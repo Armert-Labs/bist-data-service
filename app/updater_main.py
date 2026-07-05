@@ -1,0 +1,63 @@
+"""Standalone updater servisi (Docker'da ayri container).
+
+Redis modunda calisir: veriyi ceker, Redis'e yazar, pub/sub yayinlar ve
+webhook alarmlarini degerlendirir. API surecleri yalnizca okur.
+
+Calistirma:  python -m app.updater_main
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import signal
+
+from prometheus_client import start_http_server
+
+from .logging_config import setup_logging
+from .store import get_store
+from .updater import updater
+from .webhooks import webhook_manager
+
+logger = logging.getLogger("bist-updater")
+
+
+async def main() -> None:
+    setup_logging()
+
+    # Updater ayri surectir; metriklerini kendi portundan yayar (Prometheus
+    # bunu ayrica scrape eder). API'nin /metrics'i yalnizca HTTP metriklerini gosterir.
+    metrics_port = int(os.environ.get("UPDATER_METRICS_PORT", "8001"))
+    try:
+        start_http_server(metrics_port)
+        logger.info("Updater metrikleri: :%d/metrics", metrics_port)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Updater metrics sunucusu baslatilamadi: %s", exc)
+
+    store = get_store()
+    await store.connect()
+
+    updater.start()
+    webhook_task = asyncio.create_task(webhook_manager.watch(store))
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # bazi platformlar
+            pass
+
+    logger.info("Updater servisi hazir.")
+    try:
+        await stop.wait()
+    finally:
+        logger.info("Updater servisi kapatiliyor...")
+        webhook_task.cancel()
+        await updater.stop()
+        await store.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

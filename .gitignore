@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# venv
+.venv/
+venv/
+env/
+
+# Ortam degiskenleri
+.env
+
+# Operator webhook konfigurasyonu (hedef URL'ler icerebilir)
+webhooks.json
+
+# Onbellek / veri
+*.log
+.cache/
+data/*.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,139 @@
+"""Olay bazli webhook (fiyat alarmlari).
+
+`webhooks.json` icindeki kurallar, store'un pub/sub akisi dinlenerek
+degerlendirilir; kosul saglaninca hedef URL'e POST atilir (retry + cooldown).
+
+NOT (guvenlik): Webhook URL'leri OPERATOR tarafindan config dosyasina yazilir
+(son kullanici girdisi degil). Yine de ic aglara POST'u sinirlamak istiyorsaniz
+bir allowlist ekleyin. Bu servis, hedef URL'leri dogrulamaz.
+
+Kural bicimi (webhooks.json):
+{
+  "rules": [
+    {"id":"thyao-ust","symbol":"THYAO","condition":"above","threshold":350,
+     "url":"https://ornek/webhook","cooldown":300}
+  ]
+}
+condition: above | below | pct_up | pct_down
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from datetime import datetime, timezone
+
+import httpx
+
+from . import metrics
+from .config import settings
+from .models import Quote
+from .store import Store
+
+logger = logging.getLogger(__name__)
+
+_VALID_CONDITIONS = {"above", "below", "pct_up", "pct_down"}
+
+
+class AlarmRule:
+    def __init__(self, data: dict) -> None:
+        self.id = str(data["id"])
+        self.symbol = str(data["symbol"]).strip().upper()
+        self.condition = str(data["condition"]).strip().lower()
+        if self.condition not in _VALID_CONDITIONS:
+            raise ValueError(f"Gecersiz condition: {self.condition}")
+        self.threshold = float(data["threshold"])
+        self.url = str(data["url"])
+        self.cooldown = float(data.get("cooldown", 300))
+        self._last_fired = 0.0
+
+    def matches(self, quote: Quote) -> bool:
+        if quote.price is None:
+            return False
+        if self.condition == "above":
+            return quote.price >= self.threshold
+        if self.condition == "below":
+            return quote.price <= self.threshold
+        if self.condition == "pct_up":
+            return (quote.change_percent or 0.0) >= self.threshold
+        if self.condition == "pct_down":
+            return (quote.change_percent or 0.0) <= -abs(self.threshold)
+        return False
+
+    def ready(self) -> bool:
+        return (time.monotonic() - self._last_fired) >= self.cooldown
+
+    def mark_fired(self) -> None:
+        self._last_fired = time.monotonic()
+
+
+class WebhookManager:
+    def __init__(self) -> None:
+        self.rules: list[AlarmRule] = []
+        self._by_symbol: dict[str, list[AlarmRule]] = {}
+        self.load()
+
+    def load(self) -> None:
+        path = settings.webhooks_config_path
+        if not os.path.exists(path):
+            logger.info("Webhook config bulunamadi (%s); kural yuklenmedi.", path)
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            self.rules = [AlarmRule(r) for r in data.get("rules", [])]
+            self._by_symbol = {}
+            for rule in self.rules:
+                self._by_symbol.setdefault(rule.symbol, []).append(rule)
+            logger.info("%d webhook kurali yuklendi.", len(self.rules))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Webhook config okunamadi: %s", exc)
+
+    async def _deliver(self, rule: AlarmRule, quote: Quote, client: httpx.AsyncClient) -> None:
+        payload = {
+            "rule_id": rule.id,
+            "symbol": quote.symbol,
+            "condition": rule.condition,
+            "threshold": rule.threshold,
+            "price": quote.price,
+            "change_percent": quote.change_percent,
+            "triggered_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for attempt in range(1, settings.webhook_max_retries + 1):
+            try:
+                resp = await client.post(rule.url, json=payload, timeout=settings.webhook_timeout)
+                resp.raise_for_status()
+                metrics.WEBHOOK_DELIVERIES.labels(status="success").inc()
+                logger.info("Webhook gonderildi: %s -> %s (%s)", rule.id, rule.url, quote.price)
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Webhook denemesi %d/%d basarisiz (%s): %s",
+                               attempt, settings.webhook_max_retries, rule.id, exc)
+                await asyncio.sleep(min(2 ** attempt, 10))
+        metrics.WEBHOOK_DELIVERIES.labels(status="failed").inc()
+
+    async def evaluate(self, quotes: list[Quote], client: httpx.AsyncClient) -> None:
+        for quote in quotes:
+            for rule in self._by_symbol.get(quote.symbol, []):
+                if rule.ready() and rule.matches(quote):
+                    rule.mark_fired()
+                    await self._deliver(rule, quote, client)
+
+    async def watch(self, store: Store) -> None:
+        if not settings.webhooks_enabled or not self.rules:
+            logger.info("Webhook izleyici pasif (etkin=%s, kural=%d).",
+                        settings.webhooks_enabled, len(self.rules))
+            return
+        logger.info("Webhook izleyici baslatildi (%d kural).", len(self.rules))
+        async with httpx.AsyncClient() as client:
+            async for quotes in store.subscribe():
+                try:
+                    await self.evaluate(quotes, client)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Webhook degerlendirme hatasi")
+
+
+webhook_manager = WebhookManager()

@@ -1,0 +1,28 @@
+{
+  "rules": [
+    {
+      "id": "thyao-ust-350",
+      "symbol": "THYAO",
+      "condition": "above",
+      "threshold": 350,
+      "url": "https://example.com/webhook/thyao",
+      "cooldown": 300
+    },
+    {
+      "id": "garan-alt-120",
+      "symbol": "GARAN",
+      "condition": "below",
+      "threshold": 120,
+      "url": "https://example.com/webhook/garan",
+      "cooldown": 600
+    },
+    {
+      "id": "asels-sert-yukselis",
+      "symbol": "ASELS",
+      "condition": "pct_up",
+      "threshold": 5,
+      "url": "https://example.com/webhook/asels",
+      "cooldown": 900
+    }
+  ]
+}
