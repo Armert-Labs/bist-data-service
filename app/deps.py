@@ -31,11 +31,10 @@ async def require_api_key(
             raise HTTPException(
                 status_code=503, detail="Sunucu kimlik dogrulama icin yapilandirilmamis."
             )
-        return  # auth kapali (yalnizca gelistirme icin)
+        return
 
     label = registry.verify(x_api_key)
     if label is None:
-        # Hangi anahtarin denendigini loglama; yalnizca kaynak IP.
         logger.warning(
             "Yetkisiz istek: %s %s (ip=%s)",
             request.method,
@@ -46,10 +45,20 @@ async def require_api_key(
     request.state.api_client = label
 
 
+def _rate_limit_key(request: Request) -> str:
+    """API key etiketi varsa anahtar bazli, yoksa IP bazli limit."""
+    presented = request.headers.get("X-API-Key")
+    if presented:
+        label = registry.verify(presented)
+        if label:
+            return f"key:{label}"
+    return get_remote_address(request)
+
+
 def _build_limiter() -> Limiter:
     storage_uri = settings.redis_url if settings.redis_enabled else "memory://"
     return Limiter(
-        key_func=get_remote_address,
+        key_func=_rate_limit_key,
         storage_uri=storage_uri,
         default_limits=[settings.rate_limit] if settings.rate_limit_enabled else [],
     )
@@ -57,5 +66,4 @@ def _build_limiter() -> Limiter:
 
 limiter = _build_limiter()
 
-# On-demand (cache-miss) cekimleri sinirlar: thread-pool doygunlugu / DoS korumasi.
 fetch_semaphore = asyncio.Semaphore(settings.max_concurrent_fetch)

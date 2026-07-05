@@ -13,14 +13,16 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+from . import metrics
 from .config import settings
-from .models import Quote
+from .models import HistoryResponse, Quote
 
 logger = logging.getLogger(__name__)
 
@@ -61,35 +63,85 @@ class Store(ABC):
     async def last_update(self) -> datetime | None: ...
 
     @abstractmethod
-    def subscribe(self) -> AsyncIterator[list[Quote]]: ...
+    async def negative_cache_has(self, symbol: str) -> bool: ...
+
+    @abstractmethod
+    async def negative_cache_add(self, symbol: str) -> None: ...
+
+    @abstractmethod
+    async def get_history_cached(
+        self, symbol: str, period: str, interval: str
+    ) -> HistoryResponse | None: ...
+
+    @abstractmethod
+    async def set_history_cached(
+        self, symbol: str, period: str, interval: str, data: HistoryResponse
+    ) -> None: ...
+
+    @abstractmethod
+    def subscribe(self, symbols: frozenset[str] | None = None) -> AsyncIterator[list[Quote]]: ...
 
     @abstractmethod
     async def get_intraday(self, symbol: str) -> list[dict]: ...
 
+    async def oldest_update_age(self) -> float | None:
+        """En eski sembol guncelleme yasi (sn). Staleness icin kullanilir."""
+        data = await self.get_all()
+        if not data:
+            return None
+        now = _now()
+        ages: list[float] = []
+        for q in data.values():
+            if q.updated_at is not None:
+                ages.append((now - q.updated_at).total_seconds())
+        return max(ages) if ages else None
+
     async def is_stale(self) -> bool:
-        lu = await self.last_update()
-        if lu is None:
+        """Veri bayat mi? Sembol bazli en eski guncelleme yasina bakar."""
+        from .market import seconds_since_open
+
+        data = await self.get_all()
+        if not data:
             return True
-        age = (_now() - lu).total_seconds()
+
+        since_open = seconds_since_open()
+        if since_open is None:
+            return False
+        if since_open <= settings.staleness_seconds:
+            return False
+
+        age = await self.oldest_update_age()
+        if age is None:
+            return True
+        metrics.OLDEST_QUOTE_AGE.set(age)
         return age > settings.staleness_seconds
 
     async def staleness_seconds(self) -> float | None:
-        lu = await self.last_update()
-        if lu is None:
-            return None
-        return (_now() - lu).total_seconds()
+        return await self.oldest_update_age()
 
 
 # --------------------------------------------------------------------------- #
 # In-memory (tek process)
 # --------------------------------------------------------------------------- #
+class _MemorySubscriber:
+    __slots__ = ("queue", "symbols")
+
+    def __init__(self, symbols: frozenset[str] | None) -> None:
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        self.symbols = symbols
+
+
 class MemoryStore(Store):
+    _NEGATIVE_MAX = 4096
+
     def __init__(self) -> None:
         self._quotes: dict[str, Quote] = {}
         self._history: dict[str, deque] = {}
         self._last_update: datetime | None = None
         self._lock = asyncio.Lock()
-        self._subscribers: set[asyncio.Queue] = set()
+        self._subscribers: set[_MemorySubscriber] = set()
+        self._negative: dict[str, float] = {}
+        self._history_cache: dict[tuple[str, str, str], tuple[float, HistoryResponse]] = {}
 
     async def connect(self) -> None:
         logger.info("MemoryStore kullaniliyor (tek-process, Redis yok).")
@@ -100,11 +152,56 @@ class MemoryStore(Store):
     async def ping(self) -> bool:
         return True
 
+    async def negative_cache_has(self, symbol: str) -> bool:
+        expiry = self._negative.get(symbol.upper())
+        if expiry is None:
+            return False
+        if time.monotonic() >= expiry:
+            self._negative.pop(symbol.upper(), None)
+            return False
+        return True
+
+    async def negative_cache_add(self, symbol: str) -> None:
+        sym = symbol.upper()
+        if len(self._negative) >= self._NEGATIVE_MAX:
+            now = time.monotonic()
+            expired = [s for s, exp in self._negative.items() if exp <= now]
+            for s in expired:
+                self._negative.pop(s, None)
+            if len(self._negative) >= self._NEGATIVE_MAX:
+                self._negative.clear()
+        self._negative[sym] = time.monotonic() + settings.negative_cache_ttl
+
+    async def get_history_cached(
+        self, symbol: str, period: str, interval: str
+    ) -> HistoryResponse | None:
+        key = (symbol.upper(), period, interval)
+        hit = self._history_cache.get(key)
+        if hit is None:
+            return None
+        if time.monotonic() >= hit[0]:
+            self._history_cache.pop(key, None)
+            return None
+        return hit[1]
+
+    async def set_history_cached(
+        self, symbol: str, period: str, interval: str, data: HistoryResponse
+    ) -> None:
+        key = (symbol.upper(), period, interval)
+        self._history_cache[key] = (
+            time.monotonic() + settings.history_cache_ttl,
+            data,
+        )
+
     def _publish(self, quotes: list[Quote]) -> None:
-        for q in list(self._subscribers):
-            # Yavas tuketici: guncellemeyi atla (backpressure).
+        for sub in list(self._subscribers):
+            filtered = quotes
+            if sub.symbols is not None:
+                filtered = [q for q in quotes if q.symbol in sub.symbols]
+            if not filtered:
+                continue
             with contextlib.suppress(asyncio.QueueFull):
-                q.put_nowait(quotes)
+                sub.queue.put_nowait(filtered)
 
     def _persist(self, quotes: dict[str, Quote]) -> None:
         if not settings.persistence_enabled:
@@ -125,9 +222,14 @@ class MemoryStore(Store):
     async def set_quotes(self, quotes: dict[str, Quote]) -> None:
         if not quotes:
             return
+        now = _now()
+        for q in quotes.values():
+            if q.updated_at is None:
+                q.updated_at = now
         async with self._lock:
             self._quotes.update(quotes)
-            self._last_update = _now()
+            times = [q.updated_at for q in self._quotes.values() if q.updated_at]
+            self._last_update = max(times) if times else _now()
             self._persist(quotes)
         self._publish(list(quotes.values()))
 
@@ -149,14 +251,14 @@ class MemoryStore(Store):
     async def last_update(self) -> datetime | None:
         return self._last_update
 
-    async def subscribe(self) -> AsyncIterator[list[Quote]]:
-        q: asyncio.Queue = asyncio.Queue(maxsize=100)
-        self._subscribers.add(q)
+    async def subscribe(self, symbols: frozenset[str] | None = None) -> AsyncIterator[list[Quote]]:
+        sub = _MemorySubscriber(symbols)
+        self._subscribers.add(sub)
         try:
             while True:
-                yield await q.get()
+                yield await sub.queue.get()
         finally:
-            self._subscribers.discard(q)
+            self._subscribers.discard(sub)
 
     async def get_intraday(self, symbol: str) -> list[dict]:
         dq = self._history.get(symbol)
@@ -177,6 +279,15 @@ class RedisStore(Store):
 
     def _hist_key(self, symbol: str) -> str:
         return f"{self._prefix}:hist:{symbol}"
+
+    def _neg_key(self, symbol: str) -> str:
+        return f"{self._prefix}:neg:{symbol.upper()}"
+
+    def _hist_cache_key(self, symbol: str, period: str, interval: str) -> str:
+        return f"{self._prefix}:histcache:{symbol.upper()}:{period}:{interval}"
+
+    def _symbol_channel(self, symbol: str) -> str:
+        return f"{self._prefix}:updates:{symbol.upper()}"
 
     async def connect(self) -> None:
         import redis.asyncio as aioredis
@@ -201,6 +312,34 @@ class RedisStore(Store):
         except Exception:
             return False
 
+    async def negative_cache_has(self, symbol: str) -> bool:
+        return bool(await self._redis.exists(self._neg_key(symbol)))
+
+    async def negative_cache_add(self, symbol: str) -> None:
+        ttl = max(1, int(settings.negative_cache_ttl))
+        await self._redis.setex(self._neg_key(symbol), ttl, "1")
+
+    async def get_history_cached(
+        self, symbol: str, period: str, interval: str
+    ) -> HistoryResponse | None:
+        raw = await self._redis.get(self._hist_cache_key(symbol, period, interval))
+        if not raw:
+            return None
+        try:
+            return HistoryResponse.model_validate_json(raw)
+        except Exception:
+            return None
+
+    async def set_history_cached(
+        self, symbol: str, period: str, interval: str, data: HistoryResponse
+    ) -> None:
+        ttl = max(1, int(settings.history_cache_ttl))
+        await self._redis.setex(
+            self._hist_cache_key(symbol, period, interval),
+            ttl,
+            data.model_dump_json(),
+        )
+
     async def _persist(self, quotes: dict[str, Quote]) -> None:
         cap = settings.persistence_max_points
         pipe = self._redis.pipeline(transaction=False)
@@ -219,14 +358,23 @@ class RedisStore(Store):
     async def set_quotes(self, quotes: dict[str, Quote]) -> None:
         if not quotes:
             return
+        now = _now()
+        for q in quotes.values():
+            if q.updated_at is None:
+                q.updated_at = now
         mapping = {s: q.model_dump_json() for s, q in quotes.items()}
         pipe = self._redis.pipeline(transaction=False)
         pipe.hset(self._quotes_key, mapping=mapping)
         pipe.set(self._last_update_key, _now().isoformat())
         await pipe.execute()
 
-        payload = json.dumps([q.model_dump(mode="json") for q in quotes.values()], default=str)
-        await self._redis.publish(self._channel, payload)
+        batch_payload = json.dumps(
+            [q.model_dump(mode="json") for q in quotes.values()], default=str
+        )
+        await self._redis.publish(self._channel, batch_payload)
+        for symbol, quote in quotes.items():
+            single = json.dumps([quote.model_dump(mode="json")], default=str)
+            await self._redis.publish(self._symbol_channel(symbol), single)
 
         if settings.persistence_enabled:
             await self._persist(quotes)
@@ -259,9 +407,13 @@ class RedisStore(Store):
         raw = await self._redis.get(self._last_update_key)
         return datetime.fromisoformat(raw) if raw else None
 
-    async def subscribe(self) -> AsyncIterator[list[Quote]]:
+    async def subscribe(self, symbols: frozenset[str] | None = None) -> AsyncIterator[list[Quote]]:
         pubsub = self._redis.pubsub()
-        await pubsub.subscribe(self._channel)
+        if symbols:
+            channels = [self._symbol_channel(s) for s in symbols]
+            await pubsub.subscribe(*channels)
+        else:
+            await pubsub.subscribe(self._channel)
         try:
             async for message in pubsub.listen():
                 if message.get("type") != "message":
@@ -272,13 +424,13 @@ class RedisStore(Store):
                 except Exception as exc:
                     logger.warning("pub/sub mesaj ayristirma hatasi: %s", exc)
         finally:
-            await pubsub.unsubscribe(self._channel)
+            await pubsub.unsubscribe()
             await pubsub.aclose()
 
     async def get_intraday(self, symbol: str) -> list[dict]:
         raw = await self._redis.lrange(self._hist_key(symbol), 0, -1)
         points = [json.loads(x) for x in raw]
-        points.reverse()  # eskiden yeniye
+        points.reverse()
         return points
 
 

@@ -1,11 +1,11 @@
 """Coklu kaynak orkestrasyonu: fallback + circuit breaker + sanity-check.
 
-Strateji: Saglayicilar oncelik sirasiyla denenir. Ilk veri donduren kaynak
-kazanir (Yahoo saglikliyken Is Yatirim'a bosuna gidilmez). Bir kaynak ard arda
-hata verirse circuit breaker onu gecici devre disi birakir.
+Strateji: Saglayicilar oncelik sirasiyla denenir. gapfill modunda her kaynak
+eksik sembolleri tamamlar. Bir kaynak ard arda hata verirse circuit breaker onu
+gecici devre disi birakir.
 
-Sanity-check: onceki bilinen fiyata gore absurt (veri bozulmasi kaynakli)
-sicramalar elenir; ana uygulamanin yanlis fiyatla islem yapmasi engellenir.
+Sanity-check: onceki bilinen fiyata gore absurt sicramalar elenir.
+Kapsam kontrolu: kismi/bos yanit basarisiz sayilir (circuit breaker tetiklenir).
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from .providers.base import CircuitBreaker, Provider
 from .providers.isyatirim import IsYatirimProvider
 from .providers.yahoo import YahooProvider
 from .providers.yahoo_chart import YahooChartProvider
+from .symbol_circuit import symbol_circuit
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,15 @@ class Aggregator:
     @property
     def provider_states(self) -> dict[str, str]:
         return {p.name: cb.state for p, cb in self._providers}
+
+    def _coverage_ok(self, fetched: dict[str, Quote], ask: list[str]) -> bool:
+        if not ask:
+            return True
+        if not fetched:
+            return False
+        hit = sum(1 for s in ask if s in fetched)
+        ratio = hit / len(ask)
+        return ratio >= (settings.provider_min_coverage_pct / 100.0)
 
     def _is_sane(self, symbol: str, quote: Quote, previous: dict[str, float] | None) -> bool:
         if not previous:
@@ -76,9 +86,11 @@ class Aggregator:
         symbols: list[str],
         previous: dict[str, float] | None = None,
     ) -> dict[str, Quote]:
-        gapfill = settings.provider_mode.lower() == "gapfill"
+        mode = settings.provider_mode.lower()
+        gapfill = mode in ("gapfill", "hybrid")
         result: dict[str, Quote] = {}
         remaining = list(symbols)
+        min_cov = settings.provider_min_coverage_pct / 100.0
 
         for provider, breaker in self._providers:
             if not remaining:
@@ -87,19 +99,46 @@ class Aggregator:
                 logger.debug("%s devre disi (circuit=%s), atlaniyor", provider.name, breaker.state)
                 continue
 
-            # failover'da her kaynaga TUM listeyi sor; gapfill'de yalnizca eksikleri.
             ask = remaining if gapfill else symbols
+            ask = [s for s in ask if symbol_circuit.allow(provider.name, s)]
+            if not ask:
+                continue
+
             metrics.FETCH_REQUESTS.labels(provider=provider.name).inc()
             try:
                 fetched = await provider.fetch_quotes(ask)
-                breaker.record_success()
-                metrics.PROVIDER_UP.labels(provider=provider.name).set(1)
             except Exception as exc:
                 breaker.record_failure()
                 metrics.FETCH_ERRORS.labels(provider=provider.name).inc()
                 metrics.PROVIDER_UP.labels(provider=provider.name).set(1 if breaker.healthy else 0)
+                for s in ask:
+                    symbol_circuit.record_failure(provider.name, s)
                 logger.warning("%s fetch hatasi, sonraki kaynaga dusuluyor: %s", provider.name, exc)
                 continue
+
+            if self._coverage_ok(fetched, ask):
+                breaker.record_success()
+                metrics.PROVIDER_UP.labels(provider=provider.name).set(1)
+            else:
+                hit = sum(1 for s in ask if s in fetched)
+                ratio = hit / len(ask) if ask else 0.0
+                breaker.record_failure()
+                metrics.FETCH_PARTIAL.labels(provider=provider.name).inc()
+                metrics.PROVIDER_UP.labels(provider=provider.name).set(1 if breaker.healthy else 0)
+                logger.warning(
+                    "%s kismi yanit: %d/%d sembol (%%%.0f, esik %%%.0f)",
+                    provider.name,
+                    hit,
+                    len(ask),
+                    ratio * 100,
+                    min_cov * 100,
+                )
+
+            for s in ask:
+                if s in fetched:
+                    symbol_circuit.record_success(provider.name, s)
+                else:
+                    symbol_circuit.record_failure(provider.name, s)
 
             for s, q in fetched.items():
                 if s not in result and self._is_sane(s, q, previous):
@@ -107,7 +146,7 @@ class Aggregator:
             remaining = [s for s in symbols if s not in result]
 
             if not gapfill and result:
-                break  # failover: ilk veri donduren kaynak yeter
+                break
 
         return result
 
@@ -117,13 +156,14 @@ class Aggregator:
                 continue
             try:
                 result = await provider.fetch_history(symbol, period, interval)
-                breaker.record_success()
+                if result.bars:
+                    breaker.record_success()
+                    return result
+                breaker.record_failure()
             except Exception as exc:
                 breaker.record_failure()
                 logger.warning("%s history hatasi: %s", provider.name, exc)
                 continue
-            if result.bars:
-                return result
         return HistoryResponse(symbol=symbol, period=period, interval=interval, bars=[])
 
 

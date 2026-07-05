@@ -31,3 +31,19 @@ def test_session_boundaries_inclusive():
     assert is_market_open(_dt(2026, 7, 6, 10, 0)) is True  # acilis
     assert is_market_open(_dt(2026, 7, 6, 18, 15)) is True  # kapanis siniri
     assert is_market_open(_dt(2026, 7, 6, 18, 16)) is False
+
+
+def test_holiday_closes_market():
+    # 2026-10-29 Persembe (Cumhuriyet Bayrami) — tatil listesi verilirse kapali.
+    holiday = frozenset({"2026-10-29"})
+    assert is_market_open(_dt(2026, 10, 29, 12, 0), holidays=holiday) is False
+    assert is_market_open(_dt(2026, 10, 29, 12, 0), holidays=frozenset()) is True
+
+
+def test_seconds_since_open():
+    from app.market import seconds_since_open
+
+    # Market acik: 12:00 -> acilistan (10:00) 7200 sn gecmis.
+    assert seconds_since_open(_dt(2026, 7, 6, 12, 0)) == 7200.0
+    # Market kapali (Pazar) -> None.
+    assert seconds_since_open(_dt(2026, 7, 5, 12, 0)) is None

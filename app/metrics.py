@@ -18,6 +18,14 @@ FETCH_ERRORS = Counter("bist_fetch_errors_total", "Kaynak cekim hatalari", ["pro
 PROVIDER_UP = Gauge("bist_provider_up", "Kaynak saglikli mi (1/0)", ["provider"])
 
 SANITY_REJECTS = Counter("bist_sanity_rejects_total", "Sanity-check ile elenen absurt fiyatlar")
+WRITE_VALIDATE_REJECTS = Counter(
+    "bist_write_validate_rejects_total", "Capraz-kaynak yazma dogrulamasinda elenen fiyatlar"
+)
+FETCH_PARTIAL = Counter(
+    "bist_fetch_partial_total", "Kapsam esiginin altinda kalan provider yanitlari", ["provider"]
+)
+DRIFT_ALERTS = Counter("bist_drift_alerts_total", "Drift monitörü esik asimi uyarilari")
+OLDEST_QUOTE_AGE = Gauge("bist_oldest_quote_age_seconds", "En eski sembol guncelleme yasi (sn)")
 
 SSE_CLIENTS = Gauge("bist_sse_clients", "Aktif SSE baglanti sayisi")
 WEBHOOK_DELIVERIES = Counter("bist_webhook_deliveries_total", "Webhook gonderimleri", ["status"])

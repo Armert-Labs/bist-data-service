@@ -43,6 +43,7 @@ from .deps import fetch_semaphore, limiter, require_api_key
 from .logging_config import set_request_id, setup_logging
 from .market import is_market_open, market_state
 from .models import HistoryResponse, Quote
+from .pipeline import fetch_and_commit, fetch_quotes
 from .store import get_store
 from .updater import updater
 from .webhooks import webhook_manager
@@ -71,8 +72,9 @@ VALID_INTERVALS = {
 VALID_SORTS = {"symbol", "price", "change", "change_percent", "volume"}
 
 _sse_clients = 0
-# /all micro-cache: (sort, order) -> (monotonic_ts, payload)
-_all_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+# /all micro-cache: (sort, order) -> (monotonic_ts, serialize edilmis JSON bytes).
+# Bytes saklanir ki cache isabetinde 507 quote yeniden serialize edilmesin.
+_all_cache: dict[tuple[str, str], tuple[float, bytes]] = {}
 
 
 @asynccontextmanager
@@ -80,6 +82,12 @@ async def lifespan(app: FastAPI):
     logger.info("Servis baslatiliyor (v%s), redis=%s", __version__, settings.redis_enabled)
 
     # Kimlik dogrulama durumu uyarilari (fail-safe farkindaligi)
+    if settings.production_mode and not registry.enabled:
+        raise RuntimeError(
+            "PRODUCTION_MODE=true ancak API anahtari tanimli degil. "
+            "API_KEYS veya API_KEYS_SHA256 ayarlayin."
+        )
+
     if settings.auth_required and not registry.enabled:
         logger.error("AUTH_REQUIRED=true ancak hic API anahtari yok! Veri uclari 503 donecek.")
     elif not registry.enabled:
@@ -198,16 +206,17 @@ async def _get_or_fetch(symbol: str) -> Quote | None:
     cached = await store.get_quote(symbol)
     if cached is not None:
         return cached
-    async with fetch_semaphore:  # bounded: thread-pool / DoS korumasi
-        # semaphore beklerken baskasi doldurmus olabilir:
+    if await store.negative_cache_has(symbol):
+        return None
+    async with fetch_semaphore:
         cached = await store.get_quote(symbol)
         if cached is not None:
             return cached
-        quotes = await aggregator.fetch_quotes([symbol])
+        quotes = await fetch_and_commit(store, [symbol], cross_validate=True)
     quote = quotes.get(symbol)
-    if quote is not None:
-        quote.market_state = market_state()
-        await store.set_quote(symbol, quote)
+    if quote is None:
+        await store.negative_cache_add(symbol)
+        return None
     return quote
 
 
@@ -239,18 +248,25 @@ async def root() -> dict:
 
 
 @app.get("/health", tags=["Sistem"], summary="Liveness — surec ayakta mi")
+@limiter.exempt
 async def health() -> dict:
-    """Liveness: surec ayakta mi. (Container restart karari icin.)"""
+    """Liveness: surec ayakta mi. (Container restart karari icin.)
+
+    Rate limit'ten muaftir: ayni IP'den gelen yogun istemci trafigi limiti
+    doldurdugunda saglik problari 429 ile 'coktu' sanilmamali.
+    """
     return {"status": "ok", "version": __version__}
 
 
 @app.get("/ready", tags=["Sistem"], summary="Readiness — trafik almaya hazir mi")
+@limiter.exempt
 async def ready() -> dict:
     """Readiness: store erisilebilir ve veri taze mi. (Trafik almaya hazir mi.)"""
     store_ok = await store.ping()
     size = await store.size() if store_ok else 0
     stale = await store.is_stale()
     age = await store.staleness_seconds()
+    oldest_age = age
     ready_flag = store_ok and size > 0 and not stale
 
     body = {
@@ -259,6 +275,7 @@ async def ready() -> dict:
         "quotes_cached": size,
         "is_stale": stale,
         "last_update_age_seconds": round(age, 1) if age is not None else None,
+        "oldest_quote_age_seconds": round(oldest_age, 1) if oldest_age is not None else None,
         "market_open": is_market_open(),
         "providers": aggregator.provider_states,
     }
@@ -286,7 +303,7 @@ async def list_symbols() -> dict:
 async def all_quotes(
     sort: str = Query(default="symbol", description="symbol|price|change|change_percent|volume"),
     order: str = Query(default="asc", description="asc|desc"),
-) -> dict:
+) -> Response:
     """TEK cagriyla tum takip edilen BIST hisselerinin anlik (gecikmeli) fiyati."""
     if sort not in VALID_SORTS:
         raise HTTPException(
@@ -295,12 +312,14 @@ async def all_quotes(
     if order not in {"asc", "desc"}:
         raise HTTPException(status_code=400, detail="order 'asc' veya 'desc' olmali.")
 
-    # Kisa-TTL onbellek: ayni (sort, order) icin tekrar serialize etme.
+    # Kisa-TTL bytes-cache: isabette hicbir serializasyon yapilmaz (Response
+    # dogrudan hazir JSON bytes doner). 507 quote'un her istekte yeniden
+    # dump edilmesi yuksek trafikte ana CPU maliyetiydi.
     cache_key = (sort, order)
     now = time.monotonic()
     hit = _all_cache.get(cache_key)
     if hit is not None and (now - hit[0]) < settings.all_cache_ttl:
-        return hit[1]
+        return Response(content=hit[1], media_type="application/json")
 
     data = await store.get_all()
     quotes = list(data.values())
@@ -314,16 +333,18 @@ async def all_quotes(
 
     quotes.sort(key=key_fn, reverse=reverse)
 
+    last_update = await store.last_update()
     payload = {
         "market": market_state(),
         "count": len(quotes),
-        "last_update": await store.last_update(),
+        "last_update": last_update.isoformat() if last_update else None,
         "is_stale": await store.is_stale(),
         "delayed": True,
         "quotes": [q.model_dump(mode="json") for q in quotes],
     }
-    _all_cache[cache_key] = (now, payload)
-    return payload
+    body = json.dumps(payload, default=str).encode("utf-8")
+    _all_cache[cache_key] = (now, body)
+    return Response(content=body, media_type="application/json")
 
 
 @app.get(
@@ -363,14 +384,14 @@ async def get_quotes(
 
     result = await store.get_quotes(requested)
     missing = [s for s in requested if s not in result]
+    missing = [s for s in missing if not await store.negative_cache_has(s)]
     if missing:
         async with fetch_semaphore:
-            fetched = await aggregator.fetch_quotes(missing)
-        state = market_state()
-        for s, q in fetched.items():
-            q.market_state = state
-            await store.set_quote(s, q)
-            result[s] = q
+            fetched = await fetch_and_commit(store, missing, cross_validate=True)
+            result.update(fetched)
+        for s in missing:
+            if s not in result:
+                await store.negative_cache_add(s)
 
     return {
         "count": len(result),
@@ -402,11 +423,15 @@ async def get_history(
             status_code=400, detail=f"Gecersiz interval. Gecerli: {sorted(VALID_INTERVALS)}"
         )
 
-    result = await aggregator.fetch_history(sym.normalize(symbol), period, interval)
+    norm = sym.normalize(symbol)
+    cached = await store.get_history_cached(norm, period, interval)
+    if cached is not None and cached.bars:
+        return cached
+
+    result = await aggregator.fetch_history(norm, period, interval)
     if not result.bars:
-        raise HTTPException(
-            status_code=404, detail=f"Gecmis veri bulunamadi: {sym.normalize(symbol)}"
-        )
+        raise HTTPException(status_code=404, detail=f"Gecmis veri bulunamadi: {norm}")
+    await store.set_history_cached(norm, period, interval, result)
     return result
 
 
@@ -461,7 +486,7 @@ async def validate(
     missing = [s for s in syms if s not in primary]
     if missing:
         async with fetch_semaphore:
-            primary.update(await aggregator.fetch_quotes(missing))
+            primary.update(await fetch_quotes(store, missing, cross_validate=False))
 
     # Her bagimsiz referans kaynagi ayri ayri cek (biri erisilemezse digeri kalir).
     references: dict[str, dict] = {}
@@ -541,11 +566,12 @@ async def stream(
         raise HTTPException(status_code=503, detail="SSE baglanti limiti dolu.")
 
     requested = set(_parse_symbols(symbols))
+    symbol_filter = frozenset(requested) if requested else None
 
     def _filter(quotes: list[Quote]) -> dict[str, dict]:
         out: dict[str, dict] = {}
         for q in quotes:
-            if not requested or q.symbol in requested:
+            if symbol_filter is None or q.symbol in symbol_filter:
                 out[q.symbol] = q.model_dump(mode="json")
         return out
 
@@ -554,7 +580,6 @@ async def stream(
         _sse_clients += 1
         metrics.SSE_CLIENTS.set(_sse_clients)
         try:
-            # 1) Ilk snapshot
             initial = await store.get_all()
             snapshot = _filter(list(initial.values()))
             if snapshot:
@@ -563,8 +588,7 @@ async def stream(
                     "data": json.dumps({"market": market_state(), "quotes": snapshot}, default=str),
                 }
 
-            # 2) Canli akis (store pub/sub)
-            async for quotes in store.subscribe():
+            async for quotes in store.subscribe(symbol_filter):
                 if await request.is_disconnected():
                     break
                 payload = _filter(quotes)
@@ -579,11 +603,16 @@ async def stream(
             _sse_clients -= 1
             metrics.SSE_CLIENTS.set(_sse_clients)
 
-    return EventSourceResponse(event_generator(), ping=15000)
+    # ping birimi SANIYEDIR (sse-starlette): 15 sn'de bir keep-alive yorumu
+    # gonderilir; market kapaliyken (veri akmazken) proxy idle-timeout'larinin
+    # baglantiyi koparmasini onler. (Onceki deger 15000 idi = ~4 saat.)
+    return EventSourceResponse(event_generator(), ping=15)
 
 
 @app.get("/demo", response_class=HTMLResponse, tags=["Sistem"], summary="Canli test sayfasi")
 async def demo() -> str:
+    if not settings.demo_enabled:
+        raise HTTPException(status_code=404, detail="Demo devre disi.")
     return _DEMO_HTML
 
 

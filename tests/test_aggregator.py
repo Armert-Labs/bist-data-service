@@ -28,13 +28,23 @@ def _agg(providers):
     return agg
 
 
-async def test_failover_prefers_first_source():
+async def test_gapfill_prefers_first_source():
     primary = FakeProvider("yahoo", {"THYAO": Quote(symbol="THYAO", price=100.0)})
     secondary = FakeProvider("isyatirim", {"THYAO": Quote(symbol="THYAO", price=999.0)})
     agg = _agg([primary, secondary])
     res = await agg.fetch_quotes(["THYAO"])
     assert res["THYAO"].price == 100.0
-    assert secondary.calls == 0  # ilk kaynak yetti
+    assert secondary.calls == 0
+
+
+async def test_gapfill_fills_missing_symbols():
+    primary = FakeProvider("yahoo", {"THYAO": Quote(symbol="THYAO", price=100.0)})
+    secondary = FakeProvider("isyatirim", {"GARAN": Quote(symbol="GARAN", price=50.0)})
+    agg = _agg([primary, secondary])
+    res = await agg.fetch_quotes(["THYAO", "GARAN"])
+    assert res["THYAO"].price == 100.0
+    assert res["GARAN"].price == 50.0
+    assert secondary.calls == 1
 
 
 async def test_failover_falls_back_on_failure():
@@ -46,8 +56,17 @@ async def test_failover_falls_back_on_failure():
     assert backup.calls == 1
 
 
+async def test_partial_response_triggers_fallback():
+    partial = FakeProvider("yahoo", {"THYAO": Quote(symbol="THYAO", price=100.0)})
+    backup = FakeProvider("isyatirim", {"GARAN": Quote(symbol="GARAN", price=50.0)})
+    agg = _agg([partial, backup])
+    res = await agg.fetch_quotes(["THYAO", "GARAN"])
+    assert "THYAO" in res
+    assert "GARAN" in res
+    assert backup.calls == 1
+
+
 async def test_sanity_rejects_absurd_jump():
-    # onceki 100 -> yeni 999 (%799 sicrama, esik %60) reddedilir
     agg = _agg([FakeProvider("yahoo", {"THYAO": Quote(symbol="THYAO", price=999.0)})])
     res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
     assert "THYAO" not in res
@@ -73,7 +92,6 @@ async def test_history_falls_back_to_source_with_bars():
                 bars=[HistoryBar(time=datetime(2026, 1, 1, tzinfo=UTC), close=10.0)],
             )
 
-    # ilk kaynak bos (FakeProvider varsayilan), ikinci kaynak dolu
     agg = _agg([FakeProvider("yahoo"), WithBars("isyatirim")])
     res = await agg.fetch_history("THYAO", "1mo", "1d")
     assert len(res.bars) == 1

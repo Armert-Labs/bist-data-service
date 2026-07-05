@@ -53,14 +53,67 @@ def test_invalid_condition_raises():
         _rule(condition="gecersiz")
 
 
+def test_http_url_rejected():
+    with pytest.raises(ValueError, match="https"):
+        _rule(url="http://hook.test/x")
+
+
+def test_allowlist_rejects_unknown_host(monkeypatch):
+    from dataclasses import replace
+
+    from app.config import settings
+
+    monkeypatch.setattr(
+        "app.webhooks.settings",
+        replace(settings, webhook_url_allowlist=["allowed.test"]),
+    )
+    with pytest.raises(ValueError, match="izin listesinde"):
+        _rule(url="https://hook.test/x")
+    _rule(url="https://allowed.test/x")  # gecerli
+
+
+def _manager(rules):
+    import asyncio
+
+    mgr = WebhookManager.__new__(WebhookManager)
+    mgr.rules = rules
+    mgr._by_symbol = {}
+    for rule in rules:
+        mgr._by_symbol.setdefault(rule.symbol, []).append(rule)
+    mgr._tasks = set()
+    mgr._delivery_sem = asyncio.Semaphore(5)
+    return mgr
+
+
 @respx.mock
 async def test_evaluate_delivers_when_triggered():
     route = respx.post("https://hook.test/x").mock(return_value=httpx.Response(200))
-    mgr = WebhookManager.__new__(WebhookManager)
-    mgr.rules = [_rule(condition="above", threshold=100)]
-    mgr._by_symbol = {"THYAO": mgr.rules}
+    mgr = _manager([_rule(condition="above", threshold=100)])
 
     async with httpx.AsyncClient() as client:
         await mgr.evaluate([Quote(symbol="THYAO", price=150)], client)
+        await mgr.drain()  # teslimatlar arka plan gorevi; bitmesini bekle
 
     assert route.called
+
+
+@respx.mock
+async def test_evaluate_does_not_block_on_slow_delivery():
+    """Yavas/basarisiz teslimat evaluate()'i bloklamamali (watch dongusu korunur)."""
+    import time as _time
+
+    respx.post("https://hook.test/x").mock(return_value=httpx.Response(500))
+    mgr = _manager([_rule(condition="above", threshold=100, cooldown=0)])
+
+    async with httpx.AsyncClient() as client:
+        started = _time.monotonic()
+        await mgr.evaluate([Quote(symbol="THYAO", price=150)], client)
+        elapsed = _time.monotonic() - started
+        # 3 retry + backoff senkron olsaydi saniyeler surerdi; gorev olarak aninda doner.
+        assert elapsed < 0.5
+        # Retry backoff'unu bekleme; gorevleri iptal edip temizle (test hizi).
+        import asyncio
+
+        for task in list(mgr._tasks):
+            task.cancel()
+        await asyncio.gather(*list(mgr._tasks), return_exceptions=True)

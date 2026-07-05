@@ -25,6 +25,7 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import httpx
 
@@ -38,6 +39,17 @@ logger = logging.getLogger(__name__)
 _VALID_CONDITIONS = {"above", "below", "pct_up", "pct_down"}
 
 
+def _validate_webhook_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Webhook URL https olmali: {url!r}")
+    if settings.webhook_url_allowlist:
+        host = (parsed.hostname or "").lower()
+        allowed = {h.lower() for h in settings.webhook_url_allowlist}
+        if host not in allowed:
+            raise ValueError(f"Webhook host izin listesinde degil: {host!r}")
+
+
 class AlarmRule:
     def __init__(self, data: dict) -> None:
         self.id = str(data["id"])
@@ -47,6 +59,7 @@ class AlarmRule:
             raise ValueError(f"Gecersiz condition: {self.condition}")
         self.threshold = float(data["threshold"])
         self.url = str(data["url"])
+        _validate_webhook_url(self.url)
         self.cooldown = float(data.get("cooldown", 300))
         # -inf: henuz tetiklenmedi -> ilk uygun kosulda hemen hazir (monotonic
         # surec-goreli oldugundan 0.0 baslangici, servis acilisinda ilk cooldown
@@ -77,6 +90,10 @@ class WebhookManager:
     def __init__(self) -> None:
         self.rules: list[AlarmRule] = []
         self._by_symbol: dict[str, list[AlarmRule]] = {}
+        # Teslimatlar arka plan gorevleri olarak kosulur; retry/backoff yapan
+        # yavas bir hedef URL, fiyat akisini dinleyen watch dongusunu bloklamaz.
+        self._tasks: set[asyncio.Task] = set()
+        self._delivery_sem = asyncio.Semaphore(5)
         self.load()
 
     def load(self) -> None:
@@ -123,12 +140,31 @@ class WebhookManager:
                 await asyncio.sleep(min(2**attempt, 10))
         metrics.WEBHOOK_DELIVERIES.labels(status="failed").inc()
 
+    async def _deliver_bounded(
+        self, rule: AlarmRule, quote: Quote, client: httpx.AsyncClient
+    ) -> None:
+        async with self._delivery_sem:
+            await self._deliver(rule, quote, client)
+
     async def evaluate(self, quotes: list[Quote], client: httpx.AsyncClient) -> None:
+        """Kurallari degerlendirir; tetiklenen teslimatlari BLOKLAMADAN baslatir.
+
+        Teslimat (timeout + retry + backoff) uzun surebilir; watch dongusunu
+        bekletmek fiyat guncellemelerinin kacirilmasina yol acar. Bu yuzden
+        teslimatlar semaforla sinirli arka plan gorevleridir.
+        """
         for quote in quotes:
             for rule in self._by_symbol.get(quote.symbol, []):
                 if rule.ready() and rule.matches(quote):
                     rule.mark_fired()
-                    await self._deliver(rule, quote, client)
+                    task = asyncio.create_task(self._deliver_bounded(rule, quote, client))
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
+
+    async def drain(self) -> None:
+        """Bekleyen tum teslimat gorevlerinin bitmesini bekler (kapanis/test)."""
+        if self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
     async def watch(self, store: Store) -> None:
         if not settings.webhooks_enabled or not self.rules:
@@ -139,12 +175,16 @@ class WebhookManager:
             )
             return
         logger.info("Webhook izleyici baslatildi (%d kural).", len(self.rules))
-        async with httpx.AsyncClient() as client:
-            async for quotes in store.subscribe():
-                try:
-                    await self.evaluate(quotes, client)
-                except Exception:
-                    logger.exception("Webhook degerlendirme hatasi")
+        try:
+            async with httpx.AsyncClient() as client:
+                async for quotes in store.subscribe():
+                    try:
+                        await self.evaluate(quotes, client)
+                    except Exception:
+                        logger.exception("Webhook degerlendirme hatasi")
+        finally:
+            # Client kapanmadan once ucuslardaki teslimatlari tamamla.
+            await self.drain()
 
 
 webhook_manager = WebhookManager()
