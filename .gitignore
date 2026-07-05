@@ -22,6 +22,14 @@ webhooks.json
 .cache/
 data/*.json
 
+# Test / kalite araclari ciktilari
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
 # IDE / OS
 .vscode/
 .idea/
