@@ -12,3 +12,11 @@ def _disable_background(monkeypatch):
     from app.main import _all_cache
 
     _all_cache.clear()
+    # In-memory store'u sifirla (testler arasi izolasyon).
+    from app.store import MemoryStore, get_store
+
+    store = get_store()
+    if isinstance(store, MemoryStore):
+        store._quotes = {}
+        store._history = {}
+        store._last_update = None

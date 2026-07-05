@@ -48,3 +48,126 @@ def test_invalid_period_rejected():
     with TestClient(app) as c:
         r = c.get("/history/THYAO", params={"period": "INVALID"})
         assert r.status_code == 400
+
+
+def _seed_store():
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    store = get_store()
+    store._quotes = {
+        "THYAO": Quote(symbol="THYAO", price=334.0, change=0.75, change_percent=0.22, volume=1000),
+        "GARAN": Quote(symbol="GARAN", price=133.5, change=-5.1, change_percent=-3.68, volume=2000),
+    }
+    store._last_update = datetime.now(UTC)
+
+
+def test_all_with_data():
+    _seed_store()
+    with TestClient(app) as c:
+        body = c.get("/all").json()
+        assert body["count"] == 2
+        assert {q["symbol"] for q in body["quotes"]} == {"THYAO", "GARAN"}
+        assert body["is_stale"] is False
+
+
+def test_all_sorted_by_change_percent_desc():
+    _seed_store()
+    with TestClient(app) as c:
+        body = c.get("/all", params={"sort": "change_percent", "order": "desc"}).json()
+        assert body["quotes"][0]["symbol"] == "THYAO"  # +0.22 > -3.68
+
+
+def test_quotes_selected_symbol():
+    _seed_store()
+    with TestClient(app) as c:
+        body = c.get("/quotes", params={"symbols": "THYAO"}).json()
+        assert body["count"] == 1
+        assert "THYAO" in body["quotes"]
+
+
+def test_ready_ok_with_fresh_data():
+    _seed_store()
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 200
+        assert r.json()["ready"] is True
+
+
+def test_symbols_list():
+    with TestClient(app) as c:
+        body = c.get("/symbols").json()
+        assert body["count"] > 100
+        assert "THYAO" in body["symbols"]
+
+
+def test_intraday_empty_ok():
+    with TestClient(app) as c:
+        body = c.get("/intraday/THYAO").json()
+        assert body["symbol"] == "THYAO"
+        assert body["count"] == 0
+
+
+def test_metrics_accessible_without_key_in_dev():
+    # Test ortaminda anahtar yok + AUTH_REQUIRED yok -> /metrics acik
+    with TestClient(app) as c:
+        r = c.get("/metrics")
+        assert r.status_code == 200
+
+
+def test_demo_page():
+    with TestClient(app) as c:
+        r = c.get("/demo")
+        assert r.status_code == 200
+        assert "BIST" in r.text
+
+
+def test_history_endpoint(monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.models import HistoryBar, HistoryResponse
+
+    async def fake_hist(symbol, period, interval):
+        return HistoryResponse(
+            symbol=symbol,
+            period=period,
+            interval=interval,
+            bars=[HistoryBar(time=datetime(2026, 1, 1, tzinfo=UTC), close=10.0)],
+        )
+
+    monkeypatch.setattr("app.main.aggregator.fetch_history", fake_hist)
+    with TestClient(app) as c:
+        body = c.get("/history/THYAO", params={"period": "1mo", "interval": "1d"}).json()
+        assert len(body["bars"]) == 1
+
+
+def test_quote_on_demand_fetch(monkeypatch):
+    from app.models import Quote
+
+    async def fake_fetch(symbols, previous=None):
+        return {s: Quote(symbol=s, price=42.0) for s in symbols}
+
+    monkeypatch.setattr("app.main.aggregator.fetch_quotes", fake_fetch)
+    with TestClient(app) as c:
+        body = c.get("/quote/THYAO").json()
+        assert body["price"] == 42.0
+
+
+def test_validate_endpoint(monkeypatch):
+    from app.models import Quote
+
+    _seed_store()  # primary: THYAO=334, GARAN=133.5
+
+    class FakeRef:
+        name = "yahoo_chart"
+
+        async def fetch_quotes(self, symbols):
+            return {s: Quote(symbol=s, price=334.0 if s == "THYAO" else 133.5) for s in symbols}
+
+    monkeypatch.setattr("app.main.aggregator.get_provider", lambda name: FakeRef())
+    with TestClient(app) as c:
+        body = c.get("/validate", params={"symbols": "THYAO,GARAN"}).json()
+        assert body["consistent"] is True
+        assert body["max_deviation_pct"] == 0.0

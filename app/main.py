@@ -107,12 +107,29 @@ async def lifespan(app: FastAPI):
         await store.close()
 
 
+_TAGS_METADATA = [
+    {"name": "Fiyat", "description": "Anlik ve gecmis fiyat uc noktalari."},
+    {"name": "Dogrulama", "description": "Kaynaklar arasi fiyat dogrulama."},
+    {"name": "Akis", "description": "SSE ile canli fiyat akisi."},
+    {"name": "Sistem", "description": "Saglik, hazirlik ve metrikler."},
+]
+
 app = FastAPI(
-    title="BIST Canli API",
-    description="BIST hisseleri icin ~15 dk gecikmeli fiyatlari toplayan, "
-    "onbellekleyen ve REST + SSE ile sunan mikroservis.",
+    title="BIST Data Service",
+    description=(
+        "BIST hisseleri icin ~15 dk gecikmeli fiyatlari toplayan, Redis'te "
+        "onbellekleyen ve REST + SSE ile sunan mikroservis.\n\n"
+        "**Kimlik dogrulama:** `API_KEYS` tanimliysa veri uc noktalari `X-API-Key` "
+        "basligi ister. `/health` ve `/ready` acik kalir."
+    ),
     version=__version__,
     lifespan=lifespan,
+    openapi_tags=_TAGS_METADATA,
+    contact={"name": "Armert Labs", "url": "https://github.com/Armert-Labs/bist-data-service"},
+    license_info={
+        "name": "MIT",
+        "url": "https://github.com/Armert-Labs/bist-data-service/blob/main/LICENSE",
+    },
 )
 
 # --- Middleware / eklentiler ---
@@ -195,7 +212,7 @@ async def _get_or_fetch(symbol: str) -> Quote | None:
 
 
 # --- Uc noktalar ---
-@app.get("/")
+@app.get("/", tags=["Sistem"], summary="Servis bilgisi")
 async def root() -> dict:
     return {
         "name": "BIST Canli API",
@@ -221,13 +238,13 @@ async def root() -> dict:
     }
 
 
-@app.get("/health")
+@app.get("/health", tags=["Sistem"], summary="Liveness — surec ayakta mi")
 async def health() -> dict:
     """Liveness: surec ayakta mi. (Container restart karari icin.)"""
     return {"status": "ok", "version": __version__}
 
 
-@app.get("/ready")
+@app.get("/ready", tags=["Sistem"], summary="Readiness — trafik almaya hazir mi")
 async def ready() -> dict:
     """Readiness: store erisilebilir ve veri taze mi. (Trafik almaya hazir mi.)"""
     store_ok = await store.ping()
@@ -250,12 +267,22 @@ async def ready() -> dict:
     return body
 
 
-@app.get("/symbols", dependencies=[Depends(require_api_key)])
+@app.get(
+    "/symbols",
+    tags=["Fiyat"],
+    summary="Takip edilen semboller",
+    dependencies=[Depends(require_api_key)],
+)
 async def list_symbols() -> dict:
     return {"count": len(updater.symbols), "symbols": updater.symbols}
 
 
-@app.get("/all", dependencies=[Depends(require_api_key)])
+@app.get(
+    "/all",
+    tags=["Fiyat"],
+    summary="Tum BIST anlik fiyatlari",
+    dependencies=[Depends(require_api_key)],
+)
 async def all_quotes(
     sort: str = Query(default="symbol", description="symbol|price|change|change_percent|volume"),
     order: str = Query(default="asc", description="asc|desc"),
@@ -299,7 +326,13 @@ async def all_quotes(
     return payload
 
 
-@app.get("/quote/{symbol}", response_model=Quote, dependencies=[Depends(require_api_key)])
+@app.get(
+    "/quote/{symbol}",
+    response_model=Quote,
+    tags=["Fiyat"],
+    summary="Tek hisse anlik fiyat",
+    dependencies=[Depends(require_api_key)],
+)
 async def get_quote(symbol: str) -> Quote:
     if not sym.is_valid_symbol(symbol):
         raise HTTPException(status_code=400, detail=f"Gecersiz sembol: {symbol!r}")
@@ -309,7 +342,12 @@ async def get_quote(symbol: str) -> Quote:
     return quote
 
 
-@app.get("/quotes", dependencies=[Depends(require_api_key)])
+@app.get(
+    "/quotes",
+    tags=["Fiyat"],
+    summary="Coklu hisse (veya tumu)",
+    dependencies=[Depends(require_api_key)],
+)
 async def get_quotes(
     symbols: str | None = Query(default=None, description="Virgulle ayrilmis, orn. THYAO,GARAN"),
 ) -> dict:
@@ -342,7 +380,11 @@ async def get_quotes(
 
 
 @app.get(
-    "/history/{symbol}", response_model=HistoryResponse, dependencies=[Depends(require_api_key)]
+    "/history/{symbol}",
+    response_model=HistoryResponse,
+    tags=["Fiyat"],
+    summary="Gecmis OHLCV",
+    dependencies=[Depends(require_api_key)],
 )
 async def get_history(
     symbol: str,
@@ -368,7 +410,12 @@ async def get_history(
     return result
 
 
-@app.get("/intraday/{symbol}", dependencies=[Depends(require_api_key)])
+@app.get(
+    "/intraday/{symbol}",
+    tags=["Fiyat"],
+    summary="Gun-ici snapshot gecmisi",
+    dependencies=[Depends(require_api_key)],
+)
 async def get_intraday(symbol: str) -> dict:
     """Servis calistigi surece biriken gun-ici fiyat noktalari (persistence).
 
@@ -395,7 +442,12 @@ REFERENCE_SYMBOLS = [
 ]
 
 
-@app.get("/validate", dependencies=[Depends(require_api_key)])
+@app.get(
+    "/validate",
+    tags=["Dogrulama"],
+    summary="Capraz-kaynak fiyat dogrulama",
+    dependencies=[Depends(require_api_key)],
+)
 async def validate(
     symbols: str | None = Query(default=None, description="Bos ise referans likit hisseler"),
 ) -> dict:
@@ -474,7 +526,12 @@ async def validate(
     }
 
 
-@app.get("/stream", dependencies=[Depends(require_api_key)])
+@app.get(
+    "/stream",
+    tags=["Akis"],
+    summary="SSE canli fiyat akisi",
+    dependencies=[Depends(require_api_key)],
+)
 async def stream(
     request: Request,
     symbols: str | None = Query(default=None, description="Virgulle ayrilmis; bos ise tum liste"),
@@ -525,7 +582,7 @@ async def stream(
     return EventSourceResponse(event_generator(), ping=15000)
 
 
-@app.get("/demo", response_class=HTMLResponse)
+@app.get("/demo", response_class=HTMLResponse, tags=["Sistem"], summary="Canli test sayfasi")
 async def demo() -> str:
     return _DEMO_HTML
 

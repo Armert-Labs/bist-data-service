@@ -10,6 +10,29 @@ from pydantic import BaseModel, Field
 class Quote(BaseModel):
     """Bir hissenin anlik (gecikmeli) fiyat goruntusu."""
 
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "symbol": "THYAO",
+                    "price": 334.0,
+                    "previous_close": 333.25,
+                    "change": 0.75,
+                    "change_percent": 0.22,
+                    "open": 335.25,
+                    "day_high": 335.75,
+                    "day_low": 330.75,
+                    "volume": 44008702,
+                    "currency": "TRY",
+                    "market_state": "OPEN",
+                    "source": "yahoo",
+                    "delayed": True,
+                    "updated_at": "2026-07-06T09:30:00Z",
+                }
+            ]
+        }
+    }
+
     symbol: str = Field(..., description="BIST sembolu, orn. THYAO")
     price: float | None = Field(None, description="Son islem fiyati")
     previous_close: float | None = Field(None, description="Onceki kapanis")

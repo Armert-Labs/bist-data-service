@@ -1,0 +1,33 @@
+"""Piyasa saati testleri (deterministik; now parametresiyle)."""
+
+from datetime import datetime
+
+from app.market import TR_TZ, is_market_open, market_state
+
+
+def _dt(year, month, day, hour, minute=0):
+    return datetime(year, month, day, hour, minute, tzinfo=TR_TZ)
+
+
+def test_open_weekday_midday():
+    # 2026-07-06 Pazartesi 12:00
+    assert is_market_open(_dt(2026, 7, 6, 12, 0)) is True
+    assert market_state(_dt(2026, 7, 6, 12, 0)) == "OPEN"
+
+
+def test_closed_on_weekend():
+    # 2026-07-05 Pazar, 2026-07-04 Cumartesi
+    assert is_market_open(_dt(2026, 7, 5, 12, 0)) is False
+    assert is_market_open(_dt(2026, 7, 4, 12, 0)) is False
+    assert market_state(_dt(2026, 7, 5, 12, 0)) == "CLOSED"
+
+
+def test_closed_before_open_and_after_close():
+    assert is_market_open(_dt(2026, 7, 6, 9, 30)) is False
+    assert is_market_open(_dt(2026, 7, 6, 19, 0)) is False
+
+
+def test_session_boundaries_inclusive():
+    assert is_market_open(_dt(2026, 7, 6, 10, 0)) is True  # acilis
+    assert is_market_open(_dt(2026, 7, 6, 18, 15)) is True  # kapanis siniri
+    assert is_market_open(_dt(2026, 7, 6, 18, 16)) is False
