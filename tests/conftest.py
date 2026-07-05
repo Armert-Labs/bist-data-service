@@ -8,10 +8,11 @@ from app.updater import updater
 def _disable_background(monkeypatch):
     # Lifespan sirasinda gercek Yahoo cekimi baslatilmasin.
     monkeypatch.setattr(updater, "start", lambda: None)
-    # /all micro-cache'i temizle (testler arasi izolasyon).
-    from app.main import _all_cache
+    # /all micro-cache ve negatif onbellegi temizle (testler arasi izolasyon).
+    from app.main import _all_cache, _negative_cache
 
     _all_cache.clear()
+    _negative_cache.clear()
     # In-memory store'u sifirla (testler arasi izolasyon).
     from app.store import MemoryStore, get_store
 

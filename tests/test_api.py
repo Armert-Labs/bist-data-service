@@ -155,6 +155,32 @@ def test_quote_on_demand_fetch(monkeypatch):
         assert body["price"] == 42.0
 
 
+def test_quote_negative_cache_prevents_upstream_hammering(monkeypatch):
+    """Bulunamayan sembole tekrarli istekler upstream'e YALNIZCA BIR KEZ gitmeli."""
+    calls = {"n": 0}
+
+    async def fake_fetch(symbols, previous=None):
+        calls["n"] += 1
+        return {}  # kaynaklarda yok
+
+    monkeypatch.setattr("app.main.aggregator.fetch_quotes", fake_fetch)
+    with TestClient(app) as c:
+        for _ in range(5):
+            assert c.get("/quote/ZZZZ").status_code == 404
+    assert calls["n"] == 1  # 4 istek negatif onbellekten dondu
+
+
+def test_all_bytes_cache_hit_identical(monkeypatch):
+    """/all cache isabetinde ayni govde donmeli (serialize-once)."""
+    _seed_store()
+    with TestClient(app) as c:
+        r1 = c.get("/all")
+        r2 = c.get("/all")
+        assert r1.status_code == r2.status_code == 200
+        assert r1.content == r2.content
+        assert r1.headers["content-type"].startswith("application/json")
+
+
 def test_validate_endpoint(monkeypatch):
     from app.models import Quote
 

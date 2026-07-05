@@ -80,8 +80,15 @@ class Settings:
     )
 
     # --- Bayatlik (staleness) ---
-    # Onbellek bu sureden uzun sure guncellenmezse /ready fail eder ve is_stale=true.
+    # MARKET ACIKKEN onbellek bu sureden uzun guncellenmezse /ready fail eder ve
+    # is_stale=true olur. Market kapaliyken veri degisemeyecegi icin bayatlamaz.
     staleness_seconds: float = field(default_factory=lambda: _get_float("STALENESS_SECONDS", 300.0))
+
+    # Bulunamayan (kaynaklarda olmayan) semboller icin negatif onbellek TTL'i (sn).
+    # Ayni gecersiz sembole tekrarli isteklerin upstream'i dovmesini onler.
+    negative_cache_ttl: float = field(
+        default_factory=lambda: _get_float("NEGATIVE_CACHE_TTL", 60.0)
+    )
 
     # --- Redis (bos ise in-memory store kullanilir) ---
     redis_url: str = field(default_factory=lambda: _get_str("REDIS_URL", ""))
@@ -131,6 +138,8 @@ class Settings:
     log_json: bool = field(default_factory=lambda: _get_bool("LOG_JSON", True))
 
     # --- BIST piyasa saatleri (Europe/Istanbul, kalici UTC+3) ---
+    # Resmi tatiller: virgulle ayrilmis ISO tarihler, orn. "2026-10-29,2027-01-01"
+    market_holidays: list[str] = field(default_factory=lambda: _get_list("MARKET_HOLIDAYS", []))
     market_tz_offset_hours: int = 3
     market_open_hour: int = 10
     market_open_minute: int = 0

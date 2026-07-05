@@ -71,8 +71,36 @@ VALID_INTERVALS = {
 VALID_SORTS = {"symbol", "price", "change", "change_percent", "volume"}
 
 _sse_clients = 0
-# /all micro-cache: (sort, order) -> (monotonic_ts, payload)
-_all_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+# /all micro-cache: (sort, order) -> (monotonic_ts, serialize edilmis JSON bytes).
+# Bytes saklanir ki cache isabetinde 507 quote yeniden serialize edilmesin.
+_all_cache: dict[tuple[str, str], tuple[float, bytes]] = {}
+
+# Negatif onbellek: kaynaklarda BULUNAMAYAN semboller icin symbol -> monotonic
+# son kullanma. Ayni gecersiz sembole tekrarli istekler upstream'e gitmez
+# (Yahoo rate-limit'ine karsi kalkan; updater'in IP'sini korur).
+_negative_cache: dict[str, float] = {}
+_NEGATIVE_CACHE_MAX = 4096
+
+
+def _negative_cache_has(symbol: str) -> bool:
+    expiry = _negative_cache.get(symbol)
+    if expiry is None:
+        return False
+    if time.monotonic() >= expiry:
+        _negative_cache.pop(symbol, None)
+        return False
+    return True
+
+
+def _negative_cache_add(symbol: str) -> None:
+    if len(_negative_cache) >= _NEGATIVE_CACHE_MAX:
+        now = time.monotonic()
+        expired = [s for s, exp in _negative_cache.items() if exp <= now]
+        for s in expired:
+            _negative_cache.pop(s, None)
+        if len(_negative_cache) >= _NEGATIVE_CACHE_MAX:
+            _negative_cache.clear()  # kotu niyetli benzersiz-sembol seli: sifirla
+    _negative_cache[symbol] = time.monotonic() + settings.negative_cache_ttl
 
 
 @asynccontextmanager
@@ -198,6 +226,8 @@ async def _get_or_fetch(symbol: str) -> Quote | None:
     cached = await store.get_quote(symbol)
     if cached is not None:
         return cached
+    if _negative_cache_has(symbol):  # yakin zamanda bulunamadi; upstream'i dovme
+        return None
     async with fetch_semaphore:  # bounded: thread-pool / DoS korumasi
         # semaphore beklerken baskasi doldurmus olabilir:
         cached = await store.get_quote(symbol)
@@ -205,9 +235,11 @@ async def _get_or_fetch(symbol: str) -> Quote | None:
             return cached
         quotes = await aggregator.fetch_quotes([symbol])
     quote = quotes.get(symbol)
-    if quote is not None:
-        quote.market_state = market_state()
-        await store.set_quote(symbol, quote)
+    if quote is None:
+        _negative_cache_add(symbol)
+        return None
+    quote.market_state = market_state()
+    await store.set_quote(symbol, quote)
     return quote
 
 
@@ -239,12 +271,18 @@ async def root() -> dict:
 
 
 @app.get("/health", tags=["Sistem"], summary="Liveness — surec ayakta mi")
+@limiter.exempt
 async def health() -> dict:
-    """Liveness: surec ayakta mi. (Container restart karari icin.)"""
+    """Liveness: surec ayakta mi. (Container restart karari icin.)
+
+    Rate limit'ten muaftir: ayni IP'den gelen yogun istemci trafigi limiti
+    doldurdugunda saglik problari 429 ile 'coktu' sanilmamali.
+    """
     return {"status": "ok", "version": __version__}
 
 
 @app.get("/ready", tags=["Sistem"], summary="Readiness — trafik almaya hazir mi")
+@limiter.exempt
 async def ready() -> dict:
     """Readiness: store erisilebilir ve veri taze mi. (Trafik almaya hazir mi.)"""
     store_ok = await store.ping()
@@ -286,7 +324,7 @@ async def list_symbols() -> dict:
 async def all_quotes(
     sort: str = Query(default="symbol", description="symbol|price|change|change_percent|volume"),
     order: str = Query(default="asc", description="asc|desc"),
-) -> dict:
+) -> Response:
     """TEK cagriyla tum takip edilen BIST hisselerinin anlik (gecikmeli) fiyati."""
     if sort not in VALID_SORTS:
         raise HTTPException(
@@ -295,12 +333,14 @@ async def all_quotes(
     if order not in {"asc", "desc"}:
         raise HTTPException(status_code=400, detail="order 'asc' veya 'desc' olmali.")
 
-    # Kisa-TTL onbellek: ayni (sort, order) icin tekrar serialize etme.
+    # Kisa-TTL bytes-cache: isabette hicbir serializasyon yapilmaz (Response
+    # dogrudan hazir JSON bytes doner). 507 quote'un her istekte yeniden
+    # dump edilmesi yuksek trafikte ana CPU maliyetiydi.
     cache_key = (sort, order)
     now = time.monotonic()
     hit = _all_cache.get(cache_key)
     if hit is not None and (now - hit[0]) < settings.all_cache_ttl:
-        return hit[1]
+        return Response(content=hit[1], media_type="application/json")
 
     data = await store.get_all()
     quotes = list(data.values())
@@ -314,16 +354,18 @@ async def all_quotes(
 
     quotes.sort(key=key_fn, reverse=reverse)
 
+    last_update = await store.last_update()
     payload = {
         "market": market_state(),
         "count": len(quotes),
-        "last_update": await store.last_update(),
+        "last_update": last_update.isoformat() if last_update else None,
         "is_stale": await store.is_stale(),
         "delayed": True,
         "quotes": [q.model_dump(mode="json") for q in quotes],
     }
-    _all_cache[cache_key] = (now, payload)
-    return payload
+    body = json.dumps(payload, default=str).encode("utf-8")
+    _all_cache[cache_key] = (now, body)
+    return Response(content=body, media_type="application/json")
 
 
 @app.get(
@@ -362,7 +404,7 @@ async def get_quotes(
         }
 
     result = await store.get_quotes(requested)
-    missing = [s for s in requested if s not in result]
+    missing = [s for s in requested if s not in result and not _negative_cache_has(s)]
     if missing:
         async with fetch_semaphore:
             fetched = await aggregator.fetch_quotes(missing)
@@ -371,6 +413,9 @@ async def get_quotes(
             q.market_state = state
             await store.set_quote(s, q)
             result[s] = q
+        for s in missing:
+            if s not in fetched:
+                _negative_cache_add(s)
 
     return {
         "count": len(result),
@@ -579,7 +624,10 @@ async def stream(
             _sse_clients -= 1
             metrics.SSE_CLIENTS.set(_sse_clients)
 
-    return EventSourceResponse(event_generator(), ping=15000)
+    # ping birimi SANIYEDIR (sse-starlette): 15 sn'de bir keep-alive yorumu
+    # gonderilir; market kapaliyken (veri akmazken) proxy idle-timeout'larinin
+    # baglantiyi koparmasini onler. (Onceki deger 15000 idi = ~4 saat.)
+    return EventSourceResponse(event_generator(), ping=15)
 
 
 @app.get("/demo", response_class=HTMLResponse, tags=["Sistem"], summary="Canli test sayfasi")

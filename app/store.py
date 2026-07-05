@@ -67,9 +67,28 @@ class Store(ABC):
     async def get_intraday(self, symbol: str) -> list[dict]: ...
 
     async def is_stale(self) -> bool:
+        """Veri bayat mi? Market saatine duyarlidir.
+
+        - Hic veri yoksa -> bayat.
+        - Market KAPALI iken -> bayat degil (fiyat degisemez; son seans verisi
+          gecerlidir). Aksi halde hafta sonu boyunca /ready 503 doner ve servis
+          load balancer'dan duser.
+        - Market ACIK iken -> yas esigi asilmissa bayat; ancak acilistan hemen
+          sonraki tolerans penceresinde (guncelleyici ilk turunu bitirene kadar)
+          onceki seans verisi bayat sayilmaz.
+        """
+        from .market import seconds_since_open  # olasi gelecek donguye karsi yerel import
+
         lu = await self.last_update()
         if lu is None:
             return True
+
+        since_open = seconds_since_open()
+        if since_open is None:  # market kapali
+            return False
+        if since_open <= settings.staleness_seconds:  # acilis tolerans penceresi
+            return False
+
         age = (_now() - lu).total_seconds()
         return age > settings.staleness_seconds
 

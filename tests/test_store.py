@@ -26,6 +26,46 @@ async def test_staleness():
     assert await store.is_stale() is False
 
 
+async def test_stale_market_closed_never_stale(monkeypatch):
+    """Market kapaliyken eski veri bayat SAYILMAZ (hafta sonu /ready 503 bugu)."""
+    from datetime import UTC, datetime, timedelta
+
+    store = MemoryStore()
+    await store.connect()
+    await store.set_quote("THYAO", Quote(symbol="THYAO", price=1.0))
+    # last_update'i 2 gun oncesine cek (hafta sonu senaryosu).
+    store._last_update = datetime.now(UTC) - timedelta(days=2)
+
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: None)  # kapali
+    assert await store.is_stale() is False
+
+
+async def test_stale_market_open_old_data_is_stale(monkeypatch):
+    """Market acik + tolerans penceresi gecmis + veri eski -> bayat."""
+    from datetime import UTC, datetime, timedelta
+
+    store = MemoryStore()
+    await store.connect()
+    await store.set_quote("THYAO", Quote(symbol="THYAO", price=1.0))
+    store._last_update = datetime.now(UTC) - timedelta(minutes=30)
+
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 3600.0)
+    assert await store.is_stale() is True
+
+
+async def test_stale_grace_period_after_open(monkeypatch):
+    """Acilistan hemen sonra onceki seans verisi bayat sayilmaz (tolerans)."""
+    from datetime import UTC, datetime, timedelta
+
+    store = MemoryStore()
+    await store.connect()
+    await store.set_quote("THYAO", Quote(symbol="THYAO", price=1.0))
+    store._last_update = datetime.now(UTC) - timedelta(days=2)  # cuma verisi
+
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 60.0)  # acilis +1dk
+    assert await store.is_stale() is False
+
+
 async def test_pubsub_delivers_updates():
     store = MemoryStore()
     await store.connect()
