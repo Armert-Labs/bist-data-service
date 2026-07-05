@@ -48,7 +48,10 @@ class AlarmRule:
         self.threshold = float(data["threshold"])
         self.url = str(data["url"])
         self.cooldown = float(data.get("cooldown", 300))
-        self._last_fired = 0.0
+        # -inf: henuz tetiklenmedi -> ilk uygun kosulda hemen hazir (monotonic
+        # surec-goreli oldugundan 0.0 baslangici, servis acilisinda ilk cooldown
+        # saniye boyunca yanlislikla "hazir degil" derdi).
+        self._last_fired = float("-inf")
 
     def matches(self, quote: Quote) -> bool:
         if quote.price is None:
