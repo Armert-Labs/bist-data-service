@@ -9,6 +9,7 @@ Calistirma:  python -m app.updater_main
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import signal
@@ -32,7 +33,7 @@ async def main() -> None:
     try:
         start_http_server(metrics_port)
         logger.info("Updater metrikleri: :%d/metrics", metrics_port)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Updater metrics sunucusu baslatilamadi: %s", exc)
 
     store = get_store()
@@ -44,10 +45,8 @@ async def main() -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
+        with contextlib.suppress(NotImplementedError):  # bazi platformlar
             loop.add_signal_handler(sig, stop.set)
-        except NotImplementedError:  # bazi platformlar
-            pass
 
     logger.info("Updater servisi hazir.")
     try:

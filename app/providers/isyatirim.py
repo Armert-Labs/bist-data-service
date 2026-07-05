@@ -18,8 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -30,10 +29,7 @@ from .base import Provider
 
 logger = logging.getLogger(__name__)
 
-_BASE = (
-    "https://www.isyatirim.com.tr/_layouts/15/Isyatirim.Website/Common/"
-    "Data.aspx/HisseTekil"
-)
+_BASE = "https://www.isyatirim.com.tr/_layouts/15/Isyatirim.Website/Common/Data.aspx/HisseTekil"
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; bist-canli-api/1.0)",
     "Accept": "application/json, text/plain, */*",
@@ -41,7 +37,7 @@ _HEADERS = {
 }
 
 
-def _f(value) -> Optional[float]:
+def _f(value) -> float | None:
     try:
         if value is None or value == "":
             return None
@@ -50,7 +46,7 @@ def _f(value) -> Optional[float]:
         return None
 
 
-def parse_quote(bist_symbol: str, rows: list[dict]) -> Optional[Quote]:
+def parse_quote(bist_symbol: str, rows: list[dict]) -> Quote | None:
     """value[] satirlarindan Quote uretir. AGSIZ; test edilebilir saf fonksiyon."""
     rows = [r for r in (rows or []) if _f(r.get("HGDG_KAPANIS")) is not None]
     if not rows:
@@ -64,7 +60,7 @@ def parse_quote(bist_symbol: str, rows: list[dict]) -> Optional[Quote]:
     previous_close = _f(prev.get("HGDG_KAPANIS")) if prev else None
 
     change = change_percent = None
-    if previous_close not in (None, 0):
+    if previous_close is not None and previous_close != 0:
         change = round(price - previous_close, 4)
         change_percent = round((price - previous_close) / previous_close * 100.0, 2)
 
@@ -81,14 +77,14 @@ def parse_quote(bist_symbol: str, rows: list[dict]) -> Optional[Quote]:
         currency="TRY",
         source="isyatirim",
         delayed=True,
-        updated_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(UTC),
     )
 
 
 class IsYatirimProvider(Provider):
     name = "isyatirim"
 
-    def __init__(self, concurrency: Optional[int] = None) -> None:
+    def __init__(self, concurrency: int | None = None) -> None:
         self._sem = asyncio.Semaphore(concurrency or settings.isyatirim_concurrency)
         self._proxy = settings.isyatirim_proxy or None
         self._timeout = settings.isyatirim_timeout
@@ -100,23 +96,20 @@ class IsYatirimProvider(Provider):
         # NOT: Eskiden enddate sonuna ".json" eklenirdi; Is Yatirim API'si
         # artik bunu tarihe dahil edip LocalDate parse hatasi veriyor. ".json"
         # olmadan JSON doner ({"ok":true,"value":[...]}).
-        return (
-            f"{_BASE}?hisse={bist_symbol}"
-            f"&startdate={start:%d-%m-%Y}&enddate={end:%d-%m-%Y}"
-        )
+        return f"{_BASE}?hisse={bist_symbol}&startdate={start:%d-%m-%Y}&enddate={end:%d-%m-%Y}"
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=self._timeout, proxy=self._proxy, trust_env=True)
 
     async def _get_rows(self, client: httpx.AsyncClient, bist: str) -> list[dict]:
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(self._retries + 1):
             try:
                 async with self._sem:
                     resp = await client.get(self._url(bist), headers=_HEADERS)
                 resp.raise_for_status()
                 return resp.json().get("value") or []
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_exc = exc
                 if attempt < self._retries:
                     await asyncio.sleep(0.5 * (attempt + 1))
@@ -124,7 +117,7 @@ class IsYatirimProvider(Provider):
             raise last_exc
         return []
 
-    async def _fetch_one(self, client: httpx.AsyncClient, symbol: str) -> Optional[Quote]:
+    async def _fetch_one(self, client: httpx.AsyncClient, symbol: str) -> Quote | None:
         bist = sym.normalize(symbol)
         rows = await self._get_rows(client, bist)
         return parse_quote(bist, rows)
@@ -139,7 +132,7 @@ class IsYatirimProvider(Provider):
                 *(self._fetch_one(client, s) for s in clean),
                 return_exceptions=True,
             )
-        for s, res in zip(clean, results):
+        for s, res in zip(clean, results, strict=False):
             if isinstance(res, Quote):
                 out[s] = res
             elif isinstance(res, Exception):
@@ -152,7 +145,7 @@ class IsYatirimProvider(Provider):
         try:
             async with self._client() as client:
                 rows = await self._get_rows(client, bist)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("isyatirim history %s hata: %s", bist, exc)
             rows = []
 
@@ -160,9 +153,12 @@ class IsYatirimProvider(Provider):
             close = _f(r.get("HGDG_KAPANIS"))
             if close is None:
                 continue
+            raw_date = r.get("HGDG_TARIH")
+            if not isinstance(raw_date, str):
+                continue
             try:
-                ts = datetime.strptime(r.get("HGDG_TARIH"), "%d-%m-%Y").replace(tzinfo=timezone.utc)
-            except (TypeError, ValueError):
+                ts = datetime.strptime(raw_date, "%d-%m-%Y").replace(tzinfo=UTC)
+            except ValueError:
                 continue
             bars.append(
                 HistoryBar(

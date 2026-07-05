@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
 
@@ -30,7 +29,7 @@ _BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; bist-canli-api/1.0)"}
 
 
-def _r(value, ndigits: int = 4) -> Optional[float]:
+def _r(value, ndigits: int = 4) -> float | None:
     try:
         if value is None:
             return None
@@ -45,7 +44,7 @@ class YahooChartProvider(Provider):
     def __init__(self, concurrency: int = 8) -> None:
         self._sem = asyncio.Semaphore(concurrency)
 
-    async def _fetch_one(self, client: httpx.AsyncClient, symbol: str) -> Optional[Quote]:
+    async def _fetch_one(self, client: httpx.AsyncClient, symbol: str) -> Quote | None:
         bist = sym.normalize(symbol)
         yahoo_symbol = sym.to_yahoo(bist)
         async with self._sem:
@@ -65,7 +64,7 @@ class YahooChartProvider(Provider):
         prev = _r(meta.get("chartPreviousClose") or meta.get("previousClose"))
 
         change = change_percent = None
-        if prev not in (None, 0):
+        if prev is not None and prev != 0:
             change = round(price - prev, 4)
             change_percent = round((price - prev) / prev * 100.0, 2)
 
@@ -78,11 +77,13 @@ class YahooChartProvider(Provider):
             open=_r(meta.get("regularMarketOpen")),
             day_high=_r(meta.get("regularMarketDayHigh")),
             day_low=_r(meta.get("regularMarketDayLow")),
-            volume=int(meta.get("regularMarketVolume")) if meta.get("regularMarketVolume") else None,
+            volume=int(meta.get("regularMarketVolume"))
+            if meta.get("regularMarketVolume")
+            else None,
             currency=meta.get("currency", "TRY"),
             source="yahoo_chart",
             delayed=True,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
         )
 
     async def fetch_quotes(self, symbols: list[str]) -> dict[str, Quote]:
@@ -95,7 +96,7 @@ class YahooChartProvider(Provider):
                 *(self._fetch_one(client, s) for s in clean),
                 return_exceptions=True,
             )
-        for s, res in zip(clean, results):
+        for s, res in zip(clean, results, strict=False):
             if isinstance(res, Quote):
                 out[s] = res
             elif isinstance(res, Exception):
@@ -115,7 +116,7 @@ class YahooChartProvider(Provider):
                 )
             resp.raise_for_status()
             result = (resp.json().get("chart", {}).get("result") or [None])[0]
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("yahoo_chart history %s: %s", yahoo_symbol, exc)
             result = None
 
@@ -132,7 +133,7 @@ class YahooChartProvider(Provider):
                 vol = volumes[idx] if idx < len(volumes) else None
                 bars.append(
                     HistoryBar(
-                        time=datetime.fromtimestamp(ts, tz=timezone.utc),
+                        time=datetime.fromtimestamp(ts, tz=UTC),
                         open=_r(opens[idx] if idx < len(opens) else None),
                         high=_r(highs[idx] if idx < len(highs) else None),
                         low=_r(lows[idx] if idx < len(lows) else None),

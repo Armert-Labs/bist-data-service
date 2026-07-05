@@ -1,166 +1,154 @@
-# BIST Canlı API (mikroservis)
+# 📈 BIST Data Service
 
-BIST hisseleri için **~15 dk gecikmeli**, halka açık fiyat verisini toplayan,
-**Redis**'te önbellekleyen ve **REST + SSE (pub/sub)** ile sunan üretim sınıfı bir
-veri kaynağı mikroservisi.
+[![CI](https://github.com/Armert-Labs/bist-data-service/actions/workflows/ci.yml/badge.svg)](https://github.com/Armert-Labs/bist-data-service/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Docker](https://img.shields.io/badge/docker-compose-2496ED.svg?logo=docker&logoColor=white)](docker-compose.yml)
 
-Kaynaklar: **Yahoo Finance** (birincil) + **İş Yatırım** (fallback). Login/oturum
-gerektirmez.
+> BIST (Borsa İstanbul) hisseleri için **~15 dk gecikmeli**, halka açık fiyat verisini
+> toplayan; Redis'te önbellekleyen; **REST + SSE + Prometheus** ile sunan üretim sınıfı
+> bir veri kaynağı mikroservisi. Login/oturum gerektirmez.
+
+Kaynaklar: **Yahoo Finance** (yfinance + v8 chart) + **İş Yatırım** (bağımsız fallback).
 
 ---
 
-## ⚠️ Yasal ve teknik gerçek
+## ✨ Özellikler
 
-| İhtiyaç | Nasıl | Kısıt |
-|---|---|---|
-| **Gerçek zamanlı** BIST | BIST lisanslı veri satıcısı + BISTECH | Aylık ücretli + sözleşme |
-| **~15 dk gecikmeli** (bu proje) | Yahoo / İş Yatırım | Ücretsiz, **kişisel/iç kullanım** |
+- 🔌 **Tek uç noktadan tüm BIST** — `GET /all` ile ~500+ hissenin anlık fiyatı
+- 🔁 **Üç katmanlı fallback** — Yahoo → Yahoo chart → İş Yatırım + circuit breaker
+- 📡 **Canlı akış** — Redis pub/sub tabanlı SSE fan-out (`/stream`)
+- ✅ **Fiyat doğrulama** — çapraz-kaynak karşılaştırma + sapma metriği (`/validate`)
+- 🔐 **Kimlik doğrulama** — çoklu API key, timing-safe, SHA-256 hash saklama
+- 🛡️ **Dayanıklılık** — sanity-check, staleness tespiti, rate limit, bounded fetch
+- 📊 **Gözlemlenebilirlik** — Prometheus `/metrics`, JSON log, `/health` + `/ready`
+- 🐳 **Üretime hazır** — Docker Compose, multi-stage imaj, non-root, CI/CD
+
+## 🏗️ Mimari
+
+```mermaid
+flowchart LR
+    subgraph sources[Veri Kaynaklari]
+        Y[Yahoo yfinance]
+        YC[Yahoo v8 chart]
+        IY[Is Yatirim]
+    end
+    U[updater\ncircuit breaker + sanity-check] -->|cek| sources
+    U -->|yaz + publish| R[(Redis\ncache + pub/sub)]
+    A[API FastAPI\nN kopya] -->|oku / dinle| R
+    C[Istemci / Ana Uygulama] -->|REST + SSE| A
+    P[Prometheus] -->|scrape| A
+    P -->|scrape| U
+```
+
+- **updater** — tek yazıcı; batch çeker, doğrular, Redis'e yazar, pub/sub yayınlar
+- **api** — stateless, N kopyaya ölçeklenir; Redis'ten okur, SSE'yi pub/sub ile besler
+- **Redis yoksa** — updater API içinde çalışır (tek instance, in-memory); `REDIS_URL` boş bırakın
+
+---
+
+## ⚠️ Yasal Not
 
 Borsa İstanbul ücretsiz gerçek zamanlı API sunmaz. Bu servis bilinçli olarak
-**gecikmeli + ücretsiz + login'siz** yolu seçer.
+**gecikmeli + ücretsiz + login'siz** yolu seçer. Gerçek zamanlı/ticari dağıtım
+**BIST lisansı** gerektirir. Yalnızca kişisel/iç kullanım içindir.
 
----
+## 🚀 Hızlı Başlangıç
 
-## Mimari
-
-```
-                 ┌──────────────┐
-                 │    Redis     │  cache + pub/sub + staleness + persistence
-                 └───┬──────┬───┘
-          yazar/yayın│      │okur/dinler
-        ┌────────────▼─┐  ┌─▼─────────────────────┐
-        │  updater     │  │  api (FastAPI, N adet) │
-        │ Yahoo+İşYat. │  │ REST + SSE + /metrics  │
-        │ circuit brkr │  │ + webhook alarmları    │
-        │ sanity-check │  └───────────────────────┘
-        └──────────────┘
-```
-
-- **updater**: Tek yazıcı. Batch'ler halinde çeker, sanity-check yapar, Redis'e
-  yazar, pub/sub yayınlar, webhook alarmlarını değerlendirir.
-- **api**: Stateless, N kopyaya ölçeklenir. Redis'ten okur; SSE'yi pub/sub ile
-  besler (polling yok).
-- **Redis yoksa** (tek instance): updater + webhook izleyici API sürecinde çalışır
-  (in-memory store). `REDIS_URL` boş bırakmak yeterli.
-
----
-
-## Hızlı başlangıç (Docker Compose — önerilen)
+### Docker Compose (önerilen)
 
 ```bash
-cd ~/development/bist-canli-api
-cp .env.example .env          # opsiyonel; düzenleyebilirsin
+git clone https://github.com/Armert-Labs/bist-data-service.git
+cd bist-data-service
+cp .env.example .env          # anahtarları/ayarları düzenleyin
 docker compose up -d --build
 ```
+API `:8000` → Dokümanlar `/docs` · Demo `/demo` · Sağlık `/health`
 
-Servisler: `redis`, `updater`, `api` (`:8000`). İlk tam tur ~55 sn sürer.
-
-- API: <http://localhost:8000>  •  Dokümanlar: `/docs`  •  Demo: `/demo`
-
-```bash
-docker compose logs -f updater   # updater günlüğü
-docker compose ps                # durum
-docker compose down              # durdur
-```
-
-## Alternatif: tek süreç (Redis'siz, geliştirme)
+### Yerel (Redis'siz, geliştirme)
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000     # REDIS_URL boş → in-memory + updater içeride
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+make run        # uvicorn app.main:app --reload
 ```
 
----
+## 🔗 Uç Noktalar
 
-## Uç noktalar
+| Yöntem | Yol | Açıklama | Auth |
+|---|---|---|:--:|
+| GET | **`/all`** | Tüm BIST anlık fiyatları (`sort`, `order`) | 🔑 |
+| GET | `/quote/{symbol}` | Tek hisse | 🔑 |
+| GET | `/quotes?symbols=` | Çoklu / tümü | 🔑 |
+| GET | `/history/{symbol}` | Geçmiş OHLCV | 🔑 |
+| GET | `/intraday/{symbol}` | Gün-içi snapshot'lar | 🔑 |
+| GET | `/validate` | Çapraz-kaynak fiyat doğrulama | 🔑 |
+| GET | `/stream?symbols=` | SSE canlı akış | 🔑 |
+| GET | `/symbols` | Takip listesi | 🔑 |
+| GET | `/health` · `/ready` | Liveness · Readiness | — |
+| GET | `/metrics` | Prometheus | 🔑* |
 
-| Yöntem | Yol | Açıklama |
-|---|---|---|
-| GET | **`/all`** | **TEK çağrıyla tüm BIST anlık fiyatları** (`sort`, `order`) |
-| GET | `/quote/{symbol}` | Tek hisse (cache-miss'te on-demand) |
-| GET | `/quotes?symbols=` | Çoklu / tümü |
-| GET | `/history/{symbol}` | Geçmiş OHLCV (`period`, `interval`) |
-| GET | `/intraday/{symbol}` | Servis içi biriken gün-içi snapshot'lar |
-| GET | `/stream?symbols=` | SSE canlı akış (Redis pub/sub fan-out) |
-| GET | `/symbols` | Takip listesi |
-| GET | `/health` | Liveness (süreç ayakta mı) |
-| GET | `/ready` | Readiness (store + taze veri + kaynak durumu) |
-| GET | `/metrics` | Prometheus (API HTTP metrikleri) |
-| GET | `/demo` | Canlı test sayfası |
-
-`/ready` 503 dönerse: veri bayat veya store erişilemez (yük dengeleyici trafiği kesmeli).
+`*` `METRICS_PUBLIC=true` ise açık. `🔑` = `API_KEYS` tanımlıysa `X-API-Key` gerekir.
 
 ```bash
-curl localhost:8000/all
-curl "localhost:8000/all?sort=change_percent&order=desc"   # en çok yükselenler
-curl localhost:8000/ready
-curl -N "localhost:8000/stream?symbols=THYAO,GARAN"
+curl -H "X-API-Key: <anahtar>" http://localhost:8000/all
+curl -H "X-API-Key: <anahtar>" "http://localhost:8000/all?sort=change_percent&order=desc"
 ```
 
----
+## 🔐 Kimlik Doğrulama
 
-## Gözlemlenebilirlik
+```bash
+# Anahtar üret
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+`.env` içinde:
+```
+API_KEYS=<anahtar>:mobil,<anahtar2>:web   # coklu, etiketli
+AUTH_REQUIRED=true                         # anahtar yoksa 503 (fail-safe)
+METRICS_PUBLIC=false                       # /metrics de auth ister
+```
+Üretimde plaintext yerine `API_KEYS_SHA256` ile hash saklayabilirsiniz.
 
-- **API metrikleri**: `http://localhost:8000/metrics` (HTTP istek süreleri, SSE bağlantı sayısı).
-- **Updater metrikleri**: updater konteynerinde `:8001/metrics` (güncelleme süresi,
-  önbellek boyutu, kaynak sağlığı, sanity redleri, webhook gönderimleri).
-- **Loglar**: JSON (LOG_JSON=true) + her isteğe `X-Request-ID`.
+## 📊 Gözlemlenebilirlik
 
-Örnek Prometheus scrape hedefleri: `api:8000` ve `updater:8001`.
+- API metrikleri: `:8000/metrics` · Updater iş metrikleri: `:8001/metrics`
+- Örnek Prometheus + Grafana yapılandırması: [`deploy/`](deploy/)
+- Yapısal JSON log + her isteğe `X-Request-ID`
 
----
+## 🧪 Geliştirme
 
-## Yapılandırma (.env)
+```bash
+make install     # bağımlılıklar + pre-commit
+make lint        # ruff
+make typecheck   # mypy
+make test        # pytest
+make cov         # pytest + kapsam
+```
+Ayrıntılar için [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## ⚙️ Yapılandırma (öne çıkanlar)
 
 | Değişken | Varsayılan | Açıklama |
 |---|---|---|
 | `REDIS_URL` | *(boş)* | Boş = in-memory. Compose: `redis://redis:6379/0` |
+| `PROVIDERS` | `yahoo,yahoo_chart,isyatirim` | Kaynak fallback zinciri |
+| `PROVIDER_MODE` | `failover` | `failover` \| `gapfill` |
 | `UPDATE_INTERVAL` | `60` | Güncelleme aralığı (sn) |
-| `BATCH_SIZE` / `BATCH_PAUSE` | `40` / `1.0` | Batch boyutu / arası bekleme |
-| `PROVIDERS` | `yahoo,isyatirim` | Kaynak öncelik sırası (fallback) |
-| `SANITY_MAX_CHANGE_PCT` | `60` | Absürt fiyat sıçraması filtresi (%) |
-| `STALENESS_SECONDS` | `300` | Bu süre güncellenmezse `/ready` fail + `is_stale` |
-| `API_KEY` | *(boş)* | Dolu ise `X-API-Key` zorunlu |
+| `STALENESS_SECONDS` | `300` | Bayatlık eşiği (`/ready`) |
 | `RATE_LIMIT` | `120/minute` | IP başına limit |
-| `MAX_CONCURRENT_FETCH` | `8` | On-demand cekim üst sınırı |
-| `MAX_SSE_CLIENTS` | `200` | Eşzamanlı SSE bağlantı sınırı |
-| `WEBHOOKS_ENABLED` | `false` | Olay bazlı alarmlar |
-| `PERSISTENCE_ENABLED` | `true` | Gün-içi snapshot saklama |
 
----
+Tam liste: [`.env.example`](.env.example)
 
-## Webhook (olay bazlı alarmlar)
+## 📈 Ölçekleme
 
-Sürekli akış için **değil** (onun için SSE var); fiyat **eşik alarmları** için.
-`webhooks.json` oluştur (`webhooks.example.json`'a bak), `WEBHOOKS_ENABLED=true` yap,
-compose'da ilgili `volumes` satırını aç.
+- `api`'yi çok kopyaya ölçekle (stateless); `updater` **tek** olmalı.
+- Redis Pub/Sub, SSE fan-out'u tüm kopyalara dağıtır.
+- K8s: `/health` → liveness, `/ready` → readiness probe.
 
-```json
-{"rules":[{"id":"thyao-ust","symbol":"THYAO","condition":"above",
-           "threshold":350,"url":"https://.../webhook","cooldown":300}]}
-```
-`condition`: `above | below | pct_up | pct_down`. Koşul sağlanınca hedef URL'e POST atılır.
+## 🤝 Katkı & Lisans
 
----
+Katkılar için [CONTRIBUTING.md](CONTRIBUTING.md) · Güvenlik: [SECURITY.md](SECURITY.md)
+· Davranış: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
-## Test
-
-```bash
-pip install -r requirements-dev.txt
-pytest
-```
-
----
-
-## Ölçekleme notları
-
-- `api`'yi çok kopyaya ölçekle (stateless). `updater` **tek** olmalı (çift çekim olmasın).
-- Redis Pub/Sub, SSE fan-out'u tüm `api` kopyalarına dağıtır.
-- Kubernetes: `/health` → livenessProbe, `/ready` → readinessProbe.
-
-## Sınırlamalar
-
-- Veri **~15 dk gecikmeli**. Resmî tatil takvimi kontrol edilmez (hafta içi + saat).
-- İş Yatırım fallback tek tek sembol çeker (yavaş); yalnızca Yahoo çökünce devreye girer.
-- Yalnızca kişisel/iç kullanım; ticari/gerçek zamanlı dağıtım BIST lisansı gerektirir.
+[MIT Lisansı](LICENSE) © 2026 Armert Labs

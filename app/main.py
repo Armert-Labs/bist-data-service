@@ -22,8 +22,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Optional
+from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -35,8 +34,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from . import __version__
-from . import metrics
+from . import __version__, metrics
 from . import symbols as sym
 from .aggregator import aggregator
 from .auth import registry
@@ -55,7 +53,21 @@ logger = logging.getLogger("bist-canli-api")
 store = get_store()
 
 VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
-VALID_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+VALID_INTERVALS = {
+    "1m",
+    "2m",
+    "5m",
+    "15m",
+    "30m",
+    "60m",
+    "90m",
+    "1h",
+    "1d",
+    "5d",
+    "1wk",
+    "1mo",
+    "3mo",
+}
 VALID_SORTS = {"symbol", "price", "change", "change_percent", "volume"}
 
 _sse_clients = 0
@@ -71,8 +83,9 @@ async def lifespan(app: FastAPI):
     if settings.auth_required and not registry.enabled:
         logger.error("AUTH_REQUIRED=true ancak hic API anahtari yok! Veri uclari 503 donecek.")
     elif not registry.enabled:
-        logger.warning("Kimlik dogrulama KAPALI (API anahtari tanimli degil). "
-                       "Uretim icin API_KEYS ayarlayin.")
+        logger.warning(
+            "Kimlik dogrulama KAPALI (API anahtari tanimli degil). Uretim icin API_KEYS ayarlayin."
+        )
 
     await store.connect()
 
@@ -122,6 +135,7 @@ _instrumentator = Instrumentator().instrument(app)
 if settings.metrics_public:
     _instrumentator.expose(app, endpoint="/metrics", include_in_schema=False)
 else:
+
     @app.get("/metrics", include_in_schema=False, dependencies=[Depends(require_api_key)])
     async def metrics_endpoint() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
@@ -129,6 +143,7 @@ else:
 
 def _rate_limit_response():
     from fastapi.responses import JSONResponse
+
     return JSONResponse(status_code=429, content={"detail": "Istek limiti asildi."})
 
 
@@ -148,7 +163,7 @@ async def request_id_middleware(request: Request, call_next):
 
 
 # --- Yardimcilar ---
-def _parse_symbols(raw: Optional[str]) -> list[str]:
+def _parse_symbols(raw: str | None) -> list[str]:
     if not raw:
         return []
     parsed: list[str] = []
@@ -162,7 +177,7 @@ def _parse_symbols(raw: Optional[str]) -> list[str]:
     return list(dict.fromkeys(parsed))
 
 
-async def _get_or_fetch(symbol: str) -> Optional[Quote]:
+async def _get_or_fetch(symbol: str) -> Quote | None:
     cached = await store.get_quote(symbol)
     if cached is not None:
         return cached
@@ -188,9 +203,21 @@ async def root() -> dict:
         "kaynak": "Yahoo Finance + Is Yatirim (fallback)",
         "gecikme": "~15 dakika",
         "ana_uc_nokta": "/all",
-        "uc_noktalar": ["/all", "/health", "/ready", "/validate", "/metrics", "/symbols",
-                        "/quote/{symbol}", "/quotes", "/history/{symbol}", "/intraday/{symbol}",
-                        "/stream", "/demo", "/docs"],
+        "uc_noktalar": [
+            "/all",
+            "/health",
+            "/ready",
+            "/validate",
+            "/metrics",
+            "/symbols",
+            "/quote/{symbol}",
+            "/quotes",
+            "/history/{symbol}",
+            "/intraday/{symbol}",
+            "/stream",
+            "/demo",
+            "/docs",
+        ],
     }
 
 
@@ -235,7 +262,9 @@ async def all_quotes(
 ) -> dict:
     """TEK cagriyla tum takip edilen BIST hisselerinin anlik (gecikmeli) fiyati."""
     if sort not in VALID_SORTS:
-        raise HTTPException(status_code=400, detail=f"Gecersiz sort. Gecerli: {sorted(VALID_SORTS)}")
+        raise HTTPException(
+            status_code=400, detail=f"Gecersiz sort. Gecerli: {sorted(VALID_SORTS)}"
+        )
     if order not in {"asc", "desc"}:
         raise HTTPException(status_code=400, detail="order 'asc' veya 'desc' olmali.")
 
@@ -282,7 +311,7 @@ async def get_quote(symbol: str) -> Quote:
 
 @app.get("/quotes", dependencies=[Depends(require_api_key)])
 async def get_quotes(
-    symbols: Optional[str] = Query(default=None, description="Virgulle ayrilmis, orn. THYAO,GARAN"),
+    symbols: str | None = Query(default=None, description="Virgulle ayrilmis, orn. THYAO,GARAN"),
 ) -> dict:
     requested = _parse_symbols(symbols)
 
@@ -312,7 +341,9 @@ async def get_quotes(
     }
 
 
-@app.get("/history/{symbol}", response_model=HistoryResponse, dependencies=[Depends(require_api_key)])
+@app.get(
+    "/history/{symbol}", response_model=HistoryResponse, dependencies=[Depends(require_api_key)]
+)
 async def get_history(
     symbol: str,
     period: str = Query(default="1mo"),
@@ -321,13 +352,19 @@ async def get_history(
     if not sym.is_valid_symbol(symbol):
         raise HTTPException(status_code=400, detail=f"Gecersiz sembol: {symbol!r}")
     if period not in VALID_PERIODS:
-        raise HTTPException(status_code=400, detail=f"Gecersiz period. Gecerli: {sorted(VALID_PERIODS)}")
+        raise HTTPException(
+            status_code=400, detail=f"Gecersiz period. Gecerli: {sorted(VALID_PERIODS)}"
+        )
     if interval not in VALID_INTERVALS:
-        raise HTTPException(status_code=400, detail=f"Gecersiz interval. Gecerli: {sorted(VALID_INTERVALS)}")
+        raise HTTPException(
+            status_code=400, detail=f"Gecersiz interval. Gecerli: {sorted(VALID_INTERVALS)}"
+        )
 
     result = await aggregator.fetch_history(sym.normalize(symbol), period, interval)
     if not result.bars:
-        raise HTTPException(status_code=404, detail=f"Gecmis veri bulunamadi: {sym.normalize(symbol)}")
+        raise HTTPException(
+            status_code=404, detail=f"Gecmis veri bulunamadi: {sym.normalize(symbol)}"
+        )
     return result
 
 
@@ -344,13 +381,23 @@ async def get_intraday(symbol: str) -> dict:
     return {"symbol": sym.normalize(symbol), "count": len(points), "points": points}
 
 
-REFERENCE_SYMBOLS = ["THYAO", "GARAN", "AKBNK", "ASELS", "SISE",
-                     "KCHOL", "TUPRS", "BIMAS", "EREGL", "FROTO"]
+REFERENCE_SYMBOLS = [
+    "THYAO",
+    "GARAN",
+    "AKBNK",
+    "ASELS",
+    "SISE",
+    "KCHOL",
+    "TUPRS",
+    "BIMAS",
+    "EREGL",
+    "FROTO",
+]
 
 
 @app.get("/validate", dependencies=[Depends(require_api_key)])
 async def validate(
-    symbols: Optional[str] = Query(default=None, description="Bos ise referans likit hisseler"),
+    symbols: str | None = Query(default=None, description="Bos ise referans likit hisseler"),
 ) -> dict:
     """Fiyat dogruluk kontrolu: birincil veriyi (cache/yfinance) BAGIMSIZ bir
     referans kaynakla (varsayilan: yahoo_chart, farkli endpoint) karsilastirir.
@@ -378,10 +425,10 @@ async def validate(
             fetched = await asyncio.wait_for(provider.fetch_quotes(syms), timeout=8.0)
             references[name] = fetched
             reference_status[name] = "ok" if fetched else "veri_yok"
-        except asyncio.TimeoutError:
+        except TimeoutError:
             references[name] = {}
             reference_status[name] = "erisilemedi: timeout"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             references[name] = {}
             reference_status[name] = f"erisilemedi: {type(exc).__name__}"
 
@@ -391,15 +438,24 @@ async def validate(
     for s in syms:
         p = primary.get(s)
         pp = p.price if p else None
-        row = {"symbol": s, "primary": pp, "primary_source": p.source if p else None, "references": {}}
+        row: dict[str, Any] = {
+            "symbol": s,
+            "primary": pp,
+            "primary_source": p.source if p else None,
+            "references": {},
+        }
         for name in settings.validate_providers:
             r = references.get(name, {}).get(s)
             rp = r.price if r else None
-            if pp is not None and rp not in (None, 0):
+            if pp is not None and rp is not None and rp != 0:
                 dev = abs(pp - rp) / rp * 100.0
                 max_dev = max(max_dev, dev)
                 any_compared = True
-                row["references"][name] = {"price": rp, "deviation_pct": round(dev, 3), "ok": dev < 1.0}
+                row["references"][name] = {
+                    "price": rp,
+                    "deviation_pct": round(dev, 3),
+                    "ok": dev < 1.0,
+                }
             else:
                 row["references"][name] = {"price": rp, "deviation_pct": None, "ok": False}
         comparisons.append(row)
@@ -421,7 +477,7 @@ async def validate(
 @app.get("/stream", dependencies=[Depends(require_api_key)])
 async def stream(
     request: Request,
-    symbols: Optional[str] = Query(default=None, description="Virgulle ayrilmis; bos ise tum liste"),
+    symbols: str | None = Query(default=None, description="Virgulle ayrilmis; bos ise tum liste"),
 ) -> EventSourceResponse:
     global _sse_clients
     if _sse_clients >= settings.max_sse_clients:
@@ -445,8 +501,10 @@ async def stream(
             initial = await store.get_all()
             snapshot = _filter(list(initial.values()))
             if snapshot:
-                yield {"event": "quotes",
-                       "data": json.dumps({"market": market_state(), "quotes": snapshot}, default=str)}
+                yield {
+                    "event": "quotes",
+                    "data": json.dumps({"market": market_state(), "quotes": snapshot}, default=str),
+                }
 
             # 2) Canli akis (store pub/sub)
             async for quotes in store.subscribe():
@@ -454,8 +512,12 @@ async def stream(
                     break
                 payload = _filter(quotes)
                 if payload:
-                    yield {"event": "quotes",
-                           "data": json.dumps({"market": market_state(), "quotes": payload}, default=str)}
+                    yield {
+                        "event": "quotes",
+                        "data": json.dumps(
+                            {"market": market_state(), "quotes": payload}, default=str
+                        ),
+                    }
         finally:
             _sse_clients -= 1
             metrics.SSE_CLIENTS.set(_sse_clients)

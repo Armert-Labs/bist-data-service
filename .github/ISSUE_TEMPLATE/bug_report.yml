@@ -1,0 +1,33 @@
+name: 🐞 Hata Bildirimi
+description: Bir hatayı bildirin
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Ne oldu?
+      description: Hatanın açıklaması ve beklenen davranış.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Yeniden üretme adımları
+      description: Hatayı yeniden üretmek için adımlar (mümkünse curl/istek örneği).
+      placeholder: |
+        1. `docker compose up -d`
+        2. `curl ...`
+        3. Hata: ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Sürüm / commit
+      placeholder: "0.1.0 veya commit SHA"
+  - type: textarea
+    id: logs
+    attributes:
+      label: İlgili loglar
+      description: "`docker compose logs` çıktısı (sırları temizleyin!)."
+      render: shell

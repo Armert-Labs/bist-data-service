@@ -10,7 +10,6 @@ araligina bakilir. Tatil takvimi gerekiyorsa buraya eklenmelidir.
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
-from typing import Optional
 
 from .config import settings
 
@@ -21,7 +20,7 @@ def now_tr() -> datetime:
     return datetime.now(TR_TZ)
 
 
-def is_market_open(now: Optional[datetime] = None) -> bool:
+def is_market_open(now: datetime | None = None) -> bool:
     current = now or now_tr()
     if current.tzinfo is None:
         current = current.replace(tzinfo=TR_TZ)
@@ -36,5 +35,5 @@ def is_market_open(now: Optional[datetime] = None) -> bool:
     return open_t <= current.time() <= close_t
 
 
-def market_state(now: Optional[datetime] = None) -> str:
+def market_state(now: datetime | None = None) -> str:
     return "OPEN" if is_market_open(now) else "CLOSED"

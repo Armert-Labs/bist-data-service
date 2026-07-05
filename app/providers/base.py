@@ -29,9 +29,12 @@ class CircuitBreaker:
 
     @property
     def state(self) -> str:
-        if self._state == "open" and self._opened_at is not None:
-            if time.monotonic() - self._opened_at >= self.reset_timeout:
-                self._state = "half_open"
+        if (
+            self._state == "open"
+            and self._opened_at is not None
+            and time.monotonic() - self._opened_at >= self.reset_timeout
+        ):
+            self._state = "half_open"
         return self._state
 
     def allow(self) -> bool:

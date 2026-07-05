@@ -75,7 +75,9 @@ class Settings:
     # Bir onceki fiyata gore kabul edilebilir maksimum mutlak degisim (%). Absurt
     # degerleri (veri bozulmasi) elemek icin. BIST tavan/taban +-%10; gap paylari
     # icin genis tutuyoruz.
-    sanity_max_change_percent: float = field(default_factory=lambda: _get_float("SANITY_MAX_CHANGE_PCT", 60.0))
+    sanity_max_change_percent: float = field(
+        default_factory=lambda: _get_float("SANITY_MAX_CHANGE_PCT", 60.0)
+    )
 
     # --- Bayatlik (staleness) ---
     # Onbellek bu sureden uzun sure guncellenmezse /ready fail eder ve is_stale=true.
@@ -87,7 +89,9 @@ class Settings:
 
     # --- Guvenlik / kimlik dogrulama ---
     api_key: str = field(default_factory=lambda: _get_str("API_KEY"))  # geriye uyum (tekil)
-    api_keys: list[str] = field(default_factory=lambda: _get_list("API_KEYS", []))  # "key:label,..."
+    api_keys: list[str] = field(
+        default_factory=lambda: _get_list("API_KEYS", [])
+    )  # "key:label,..."
     api_keys_sha256: list[str] = field(default_factory=lambda: _get_list("API_KEYS_SHA256", []))
     # true ise ve hic anahtar tanimli degilse veri uclari 503 doner (fail-safe:
     # yanlislikla auth'suz acik kalmayi onler).
@@ -108,13 +112,19 @@ class Settings:
 
     # --- Webhook (olay bazli alarmlar) ---
     webhooks_enabled: bool = field(default_factory=lambda: _get_bool("WEBHOOKS_ENABLED", False))
-    webhooks_config_path: str = field(default_factory=lambda: _get_str("WEBHOOKS_CONFIG", "webhooks.json"))
+    webhooks_config_path: str = field(
+        default_factory=lambda: _get_str("WEBHOOKS_CONFIG", "webhooks.json")
+    )
     webhook_timeout: float = field(default_factory=lambda: _get_float("WEBHOOK_TIMEOUT", 5.0))
     webhook_max_retries: int = field(default_factory=lambda: _get_int("WEBHOOK_MAX_RETRIES", 3))
 
     # --- Persistence (intraday snapshot) ---
-    persistence_enabled: bool = field(default_factory=lambda: _get_bool("PERSISTENCE_ENABLED", True))
-    persistence_max_points: int = field(default_factory=lambda: _get_int("PERSISTENCE_MAX_POINTS", 500))
+    persistence_enabled: bool = field(
+        default_factory=lambda: _get_bool("PERSISTENCE_ENABLED", True)
+    )
+    persistence_max_points: int = field(
+        default_factory=lambda: _get_int("PERSISTENCE_MAX_POINTS", 500)
+    )
 
     # --- Loglama ---
     log_level: str = field(default_factory=lambda: _get_str("LOG_LEVEL", "INFO"))

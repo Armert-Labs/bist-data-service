@@ -22,7 +22,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
-from typing import Optional
 
 from .config import settings
 
@@ -63,12 +62,12 @@ class ApiKeyRegistry:
     def enabled(self) -> bool:
         return len(self._entries) > 0
 
-    def verify(self, presented: Optional[str]) -> Optional[str]:
+    def verify(self, presented: str | None) -> str | None:
         """Gecerliyse etiketi, degilse None doner. Sabit zamanli."""
         if not presented:
             return None
         presented_hash = hashlib.sha256(presented.encode("utf-8")).hexdigest()
-        matched: Optional[str] = None
+        matched: str | None = None
         # Erken cikmadan tum girdileri dolas (timing sizintisini azalt).
         for secret, label, is_hash in self._entries:
             candidate = presented_hash if is_hash else presented

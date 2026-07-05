@@ -10,12 +10,14 @@ Ikisi de ayni async arayuzu uygular; kod store tipinden habersizdir.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from abc import ABC, abstractmethod
 from collections import deque
-from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
 
 from .config import settings
 from .models import Quote
@@ -24,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Store(ABC):
@@ -44,7 +46,7 @@ class Store(ABC):
     async def set_quote(self, symbol: str, quote: Quote) -> None: ...
 
     @abstractmethod
-    async def get_quote(self, symbol: str) -> Optional[Quote]: ...
+    async def get_quote(self, symbol: str) -> Quote | None: ...
 
     @abstractmethod
     async def get_quotes(self, symbols: list[str]) -> dict[str, Quote]: ...
@@ -56,7 +58,7 @@ class Store(ABC):
     async def size(self) -> int: ...
 
     @abstractmethod
-    async def last_update(self) -> Optional[datetime]: ...
+    async def last_update(self) -> datetime | None: ...
 
     @abstractmethod
     def subscribe(self) -> AsyncIterator[list[Quote]]: ...
@@ -71,7 +73,7 @@ class Store(ABC):
         age = (_now() - lu).total_seconds()
         return age > settings.staleness_seconds
 
-    async def staleness_seconds(self) -> Optional[float]:
+    async def staleness_seconds(self) -> float | None:
         lu = await self.last_update()
         if lu is None:
             return None
@@ -85,7 +87,7 @@ class MemoryStore(Store):
     def __init__(self) -> None:
         self._quotes: dict[str, Quote] = {}
         self._history: dict[str, deque] = {}
-        self._last_update: Optional[datetime] = None
+        self._last_update: datetime | None = None
         self._lock = asyncio.Lock()
         self._subscribers: set[asyncio.Queue] = set()
 
@@ -100,11 +102,9 @@ class MemoryStore(Store):
 
     def _publish(self, quotes: list[Quote]) -> None:
         for q in list(self._subscribers):
-            try:
+            # Yavas tuketici: guncellemeyi atla (backpressure).
+            with contextlib.suppress(asyncio.QueueFull):
                 q.put_nowait(quotes)
-            except asyncio.QueueFull:
-                # Yavas tuketici: guncellemeyi atla (backpressure).
-                pass
 
     def _persist(self, quotes: dict[str, Quote]) -> None:
         if not settings.persistence_enabled:
@@ -115,10 +115,12 @@ class MemoryStore(Store):
             if dq is None:
                 dq = deque(maxlen=cap)
                 self._history[symbol] = dq
-            dq.append({
-                "t": quote.updated_at.isoformat() if quote.updated_at else None,
-                "p": quote.price,
-            })
+            dq.append(
+                {
+                    "t": quote.updated_at.isoformat() if quote.updated_at else None,
+                    "p": quote.price,
+                }
+            )
 
     async def set_quotes(self, quotes: dict[str, Quote]) -> None:
         if not quotes:
@@ -132,7 +134,7 @@ class MemoryStore(Store):
     async def set_quote(self, symbol: str, quote: Quote) -> None:
         await self.set_quotes({symbol: quote})
 
-    async def get_quote(self, symbol: str) -> Optional[Quote]:
+    async def get_quote(self, symbol: str) -> Quote | None:
         return self._quotes.get(symbol)
 
     async def get_quotes(self, symbols: list[str]) -> dict[str, Quote]:
@@ -144,7 +146,7 @@ class MemoryStore(Store):
     async def size(self) -> int:
         return len(self._quotes)
 
-    async def last_update(self) -> Optional[datetime]:
+    async def last_update(self) -> datetime | None:
         return self._last_update
 
     async def subscribe(self) -> AsyncIterator[list[Quote]]:
@@ -168,7 +170,7 @@ class RedisStore(Store):
     def __init__(self, url: str, prefix: str) -> None:
         self._url = url
         self._prefix = prefix
-        self._redis = None
+        self._redis: Any = None
         self._quotes_key = f"{prefix}:quotes"
         self._last_update_key = f"{prefix}:meta:last_update"
         self._channel = f"{prefix}:updates"
@@ -196,7 +198,7 @@ class RedisStore(Store):
     async def ping(self) -> bool:
         try:
             return bool(await self._redis.ping())
-        except Exception:  # noqa: BLE001
+        except Exception:
             return False
 
     async def _persist(self, quotes: dict[str, Quote]) -> None:
@@ -204,10 +206,12 @@ class RedisStore(Store):
         pipe = self._redis.pipeline(transaction=False)
         for symbol, quote in quotes.items():
             key = self._hist_key(symbol)
-            point = json.dumps({
-                "t": quote.updated_at.isoformat() if quote.updated_at else None,
-                "p": quote.price,
-            })
+            point = json.dumps(
+                {
+                    "t": quote.updated_at.isoformat() if quote.updated_at else None,
+                    "p": quote.price,
+                }
+            )
             pipe.lpush(key, point)
             pipe.ltrim(key, 0, cap - 1)
         await pipe.execute()
@@ -230,7 +234,7 @@ class RedisStore(Store):
     async def set_quote(self, symbol: str, quote: Quote) -> None:
         await self.set_quotes({symbol: quote})
 
-    async def get_quote(self, symbol: str) -> Optional[Quote]:
+    async def get_quote(self, symbol: str) -> Quote | None:
         raw = await self._redis.hget(self._quotes_key, symbol)
         return Quote.model_validate_json(raw) if raw else None
 
@@ -239,7 +243,7 @@ class RedisStore(Store):
             return {}
         raw = await self._redis.hmget(self._quotes_key, symbols)
         out: dict[str, Quote] = {}
-        for symbol, value in zip(symbols, raw):
+        for symbol, value in zip(symbols, raw, strict=False):
             if value:
                 out[symbol] = Quote.model_validate_json(value)
         return out
@@ -251,7 +255,7 @@ class RedisStore(Store):
     async def size(self) -> int:
         return int(await self._redis.hlen(self._quotes_key))
 
-    async def last_update(self) -> Optional[datetime]:
+    async def last_update(self) -> datetime | None:
         raw = await self._redis.get(self._last_update_key)
         return datetime.fromisoformat(raw) if raw else None
 
@@ -265,7 +269,7 @@ class RedisStore(Store):
                 try:
                     data = json.loads(message["data"])
                     yield [Quote.model_validate(item) for item in data]
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("pub/sub mesaj ayristirma hatasi: %s", exc)
         finally:
             await pubsub.unsubscribe(self._channel)
@@ -281,7 +285,7 @@ class RedisStore(Store):
 # --------------------------------------------------------------------------- #
 # Fabrika (singleton)
 # --------------------------------------------------------------------------- #
-_store: Optional[Store] = None
+_store: Store | None = None
 
 
 def get_store() -> Store:

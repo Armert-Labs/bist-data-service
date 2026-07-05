@@ -1,0 +1,23 @@
+# Ornek Prometheus scrape yapilandirmasi.
+# Kullanim: bu dosyayi Prometheus'a mount edin ve api/updater servislerine erisebildiginden emin olun.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Updater is metrikleri (auth yok; asil is metrikleri burada:
+  # bist_quotes_cached, bist_update_duration_seconds, bist_provider_up, ...)
+  - job_name: "bist-updater"
+    static_configs:
+      - targets: ["updater:8001"]
+
+  # API HTTP metrikleri. NOT: METRICS_PUBLIC=false ise /metrics API key ister.
+  # Bu durumda asagidaki authorization satirini kullanin (Bearer yerine ozel
+  # header gerekiyorsa METRICS_PUBLIC=true ile ic aga acmak daha pratiktir).
+  - job_name: "bist-api"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+    # authorization:
+    #   type: Bearer
+    #   credentials: "<token>"

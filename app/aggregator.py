@@ -11,7 +11,6 @@ sicramalar elenir; ana uygulamanin yanlis fiyatla islem yapmasi engellenir.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from . import metrics
 from .config import settings
@@ -47,23 +46,26 @@ class Aggregator:
     def provider_states(self) -> dict[str, str]:
         return {p.name: cb.state for p, cb in self._providers}
 
-    def _is_sane(self, symbol: str, quote: Quote, previous: Optional[dict[str, float]]) -> bool:
+    def _is_sane(self, symbol: str, quote: Quote, previous: dict[str, float] | None) -> bool:
         if not previous:
             return True
         prev = previous.get(symbol)
-        if prev in (None, 0) or quote.price is None:
+        if prev is None or prev == 0 or quote.price is None:
             return True
         change_pct = abs((quote.price - prev) / prev * 100.0)
         if change_pct > settings.sanity_max_change_percent:
             metrics.SANITY_REJECTS.inc()
             logger.warning(
                 "Sanity reddi %s: %%%.1f degisim (%.4f -> %.4f)",
-                symbol, change_pct, prev, quote.price,
+                symbol,
+                change_pct,
+                prev,
+                quote.price,
             )
             return False
         return True
 
-    def get_provider(self, name: str) -> Optional[Provider]:
+    def get_provider(self, name: str) -> Provider | None:
         for provider, _ in self._providers:
             if provider.name == name:
                 return provider
@@ -72,7 +74,7 @@ class Aggregator:
     async def fetch_quotes(
         self,
         symbols: list[str],
-        previous: Optional[dict[str, float]] = None,
+        previous: dict[str, float] | None = None,
     ) -> dict[str, Quote]:
         gapfill = settings.provider_mode.lower() == "gapfill"
         result: dict[str, Quote] = {}
@@ -92,7 +94,7 @@ class Aggregator:
                 fetched = await provider.fetch_quotes(ask)
                 breaker.record_success()
                 metrics.PROVIDER_UP.labels(provider=provider.name).set(1)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 breaker.record_failure()
                 metrics.FETCH_ERRORS.labels(provider=provider.name).inc()
                 metrics.PROVIDER_UP.labels(provider=provider.name).set(1 if breaker.healthy else 0)
@@ -116,7 +118,7 @@ class Aggregator:
             try:
                 result = await provider.fetch_history(symbol, period, interval)
                 breaker.record_success()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 breaker.record_failure()
                 logger.warning("%s history hatasi: %s", provider.name, exc)
                 continue

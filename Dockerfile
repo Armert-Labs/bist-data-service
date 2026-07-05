@@ -1,25 +1,29 @@
-FROM python:3.13-slim
+# --- Build asamasi: bagimliliklari ve paketi derle ---
+FROM python:3.13-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /src
+COPY pyproject.toml README.md ./
+COPY app ./app
+RUN pip install --no-cache-dir --prefix=/install .
+
+# --- Runtime asamasi: yalin, root olmayan ---
+FROM python:3.13-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PYTHONDONTWRITEBYTECODE=1
 
-WORKDIR /app
-
-# Healthcheck icin curl
+# Healthcheck icin curl + root olmayan kullanici
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 appuser
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=builder /install /usr/local
 
-COPY app ./app
-
-# Root olmayan kullanici (guvenlik)
-RUN useradd --create-home --uid 10001 appuser
 USER appuser
-
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \

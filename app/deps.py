@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
 from fastapi import Header, HTTPException, Request
 from slowapi import Limiter
@@ -18,7 +17,7 @@ logger = logging.getLogger("bist-canli-api.auth")
 
 async def require_api_key(
     request: Request,
-    x_api_key: Optional[str] = Header(default=None),
+    x_api_key: str | None = Header(default=None),
 ) -> None:
     """Kimlik dogrulama bagimliligi.
 
@@ -29,14 +28,20 @@ async def require_api_key(
     if not registry.enabled:
         if settings.auth_required:
             logger.error("AUTH_REQUIRED=true ancak hic API anahtari tanimli degil.")
-            raise HTTPException(status_code=503, detail="Sunucu kimlik dogrulama icin yapilandirilmamis.")
+            raise HTTPException(
+                status_code=503, detail="Sunucu kimlik dogrulama icin yapilandirilmamis."
+            )
         return  # auth kapali (yalnizca gelistirme icin)
 
     label = registry.verify(x_api_key)
     if label is None:
         # Hangi anahtarin denendigini loglama; yalnizca kaynak IP.
-        logger.warning("Yetkisiz istek: %s %s (ip=%s)",
-                       request.method, request.url.path, get_remote_address(request))
+        logger.warning(
+            "Yetkisiz istek: %s %s (ip=%s)",
+            request.method,
+            request.url.path,
+            get_remote_address(request),
+        )
         raise HTTPException(status_code=401, detail="Gecersiz veya eksik API anahtari.")
     request.state.api_client = label
 

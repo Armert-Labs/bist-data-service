@@ -10,5 +10,10 @@ server.log
 *.log
 tests/
 *.md
+!README.md
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+deploy/
+scripts/
 .DS_Store

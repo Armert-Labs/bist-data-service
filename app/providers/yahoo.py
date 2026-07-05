@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import pandas as pd
 import yfinance as yf
@@ -25,7 +24,7 @@ from .base import Provider
 logger = logging.getLogger(__name__)
 
 
-def _safe_float(value, ndigits: Optional[int] = None) -> Optional[float]:
+def _safe_float(value, ndigits: int | None = None) -> float | None:
     try:
         if value is None:
             return None
@@ -37,12 +36,12 @@ def _safe_float(value, ndigits: Optional[int] = None) -> Optional[float]:
         return None
 
 
-def _safe_int(value) -> Optional[int]:
+def _safe_int(value) -> int | None:
     f = _safe_float(value)
     return int(f) if f is not None else None
 
 
-def _quote_from_frame(bist_symbol: str, df: Optional[pd.DataFrame]) -> Optional[Quote]:
+def _quote_from_frame(bist_symbol: str, df: pd.DataFrame | None) -> Quote | None:
     if df is None or getattr(df, "empty", True):
         return None
     df = df.dropna(how="all")
@@ -58,7 +57,7 @@ def _quote_from_frame(bist_symbol: str, df: Optional[pd.DataFrame]) -> Optional[
 
     change = None
     change_percent = None
-    if previous_close not in (None, 0):
+    if previous_close is not None and previous_close != 0:
         change = round(price - previous_close, 4)
         change_percent = round((price - previous_close) / previous_close * 100.0, 2)
 
@@ -75,7 +74,7 @@ def _quote_from_frame(bist_symbol: str, df: Optional[pd.DataFrame]) -> Optional[
         currency="TRY",
         source="yahoo",
         delayed=True,
-        updated_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(UTC),
     )
 
 
@@ -104,7 +103,7 @@ def fetch_quotes(symbols: list[str]) -> dict[str, Quote]:
             threads=True,
             progress=False,
         )
-    except Exception as exc:  # noqa: BLE001 - dis kaynak, genis yakala
+    except Exception as exc:
         logger.warning("yf.download hatasi (%d sembol): %s", len(yahoo_syms), exc)
         return {}
 
@@ -131,7 +130,7 @@ def fetch_quotes(symbols: list[str]) -> dict[str, Quote]:
         bist = sym.from_yahoo(ysym)
         try:
             quote = _quote_from_frame(bist, data[ysym])
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("%s ayristirma hatasi: %s", ysym, exc)
             continue
         if quote is not None:
@@ -149,7 +148,7 @@ def fetch_history(symbol: str, period: str = "1mo", interval: str = "1d") -> His
     try:
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=period, interval=interval, auto_adjust=False)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("history hatasi %s: %s", yahoo_symbol, exc)
         df = None
 
@@ -157,7 +156,7 @@ def fetch_history(symbol: str, period: str = "1mo", interval: str = "1d") -> His
         for idx, row in df.iterrows():
             ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.replace(tzinfo=UTC)
             bars.append(
                 HistoryBar(
                     time=ts,

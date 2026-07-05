@@ -12,9 +12,10 @@ Calisma modu:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from . import metrics
 from . import symbols as sym
@@ -63,21 +64,19 @@ class BackgroundUpdater:
         duration = time.monotonic() - started
         metrics.UPDATE_DURATION.observe(duration)
         metrics.UPDATE_SYMBOLS.set(total)
-        try:
+        with contextlib.suppress(Exception):
             metrics.QUOTES_CACHED.set(await self._store.size())
-        except Exception:  # noqa: BLE001
-            pass
-        logger.info("Guncelleme tamamlandi: %d/%d sembol, %.1f sn", total, len(self._symbols), duration)
+        logger.info(
+            "Guncelleme tamamlandi: %d/%d sembol, %.1f sn", total, len(self._symbols), duration
+        )
         return total
 
     async def _refresh_age_metric(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             lu = await self._store.last_update()
             if lu is not None:
-                age = (datetime.now(timezone.utc) - lu).total_seconds()
+                age = (datetime.now(UTC) - lu).total_seconds()
                 metrics.LAST_UPDATE_AGE.set(age)
-        except Exception:  # noqa: BLE001
-            pass
 
     async def _loop(self) -> None:
         self.running = True
@@ -90,13 +89,11 @@ class BackgroundUpdater:
                 else:
                     logger.debug("Piyasa kapali; guncelleme atlandi.")
                 await self._refresh_age_metric()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Guncelleme dongusunde beklenmeyen hata")
 
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=settings.update_interval)
-            except asyncio.TimeoutError:
-                pass
         self.running = False
 
     def start(self) -> None:
@@ -110,7 +107,7 @@ class BackgroundUpdater:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=10)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._task.cancel()
         logger.info("Arka plan guncelleyici durduruldu.")
 

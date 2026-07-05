@@ -24,7 +24,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -89,7 +89,7 @@ class WebhookManager:
             for rule in self.rules:
                 self._by_symbol.setdefault(rule.symbol, []).append(rule)
             logger.info("%d webhook kurali yuklendi.", len(self.rules))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("Webhook config okunamadi: %s", exc)
 
     async def _deliver(self, rule: AlarmRule, quote: Quote, client: httpx.AsyncClient) -> None:
@@ -100,7 +100,7 @@ class WebhookManager:
             "threshold": rule.threshold,
             "price": quote.price,
             "change_percent": quote.change_percent,
-            "triggered_at": datetime.now(timezone.utc).isoformat(),
+            "triggered_at": datetime.now(UTC).isoformat(),
         }
         for attempt in range(1, settings.webhook_max_retries + 1):
             try:
@@ -109,10 +109,15 @@ class WebhookManager:
                 metrics.WEBHOOK_DELIVERIES.labels(status="success").inc()
                 logger.info("Webhook gonderildi: %s -> %s (%s)", rule.id, rule.url, quote.price)
                 return
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Webhook denemesi %d/%d basarisiz (%s): %s",
-                               attempt, settings.webhook_max_retries, rule.id, exc)
-                await asyncio.sleep(min(2 ** attempt, 10))
+            except Exception as exc:
+                logger.warning(
+                    "Webhook denemesi %d/%d basarisiz (%s): %s",
+                    attempt,
+                    settings.webhook_max_retries,
+                    rule.id,
+                    exc,
+                )
+                await asyncio.sleep(min(2**attempt, 10))
         metrics.WEBHOOK_DELIVERIES.labels(status="failed").inc()
 
     async def evaluate(self, quotes: list[Quote], client: httpx.AsyncClient) -> None:
@@ -124,15 +129,18 @@ class WebhookManager:
 
     async def watch(self, store: Store) -> None:
         if not settings.webhooks_enabled or not self.rules:
-            logger.info("Webhook izleyici pasif (etkin=%s, kural=%d).",
-                        settings.webhooks_enabled, len(self.rules))
+            logger.info(
+                "Webhook izleyici pasif (etkin=%s, kural=%d).",
+                settings.webhooks_enabled,
+                len(self.rules),
+            )
             return
         logger.info("Webhook izleyici baslatildi (%d kural).", len(self.rules))
         async with httpx.AsyncClient() as client:
             async for quotes in store.subscribe():
                 try:
                     await self.evaluate(quotes, client)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception("Webhook degerlendirme hatasi")
 
 

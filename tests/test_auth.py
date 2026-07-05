@@ -2,10 +2,9 @@
 
 import hashlib
 
-from fastapi.testclient import TestClient
-
 from app.auth import ApiKeyRegistry, registry
 from app.main import app
+from fastapi.testclient import TestClient
 
 
 def _registry_with(entries):
@@ -24,7 +23,7 @@ def test_verify_plaintext():
 
 
 def test_verify_hashed():
-    h = hashlib.sha256("gizli-anahtar".encode()).hexdigest()
+    h = hashlib.sha256(b"gizli-anahtar").hexdigest()
     reg = _registry_with([(h, "web", True)])
     assert reg.verify("gizli-anahtar") == "web"
     assert reg.verify("baska") is None
@@ -46,8 +45,8 @@ def test_disabled_registry_allows_open_access():
 def test_endpoint_enforces_key_when_enabled(monkeypatch):
     monkeypatch.setattr(registry, "_entries", [("testkey", "test", False)])
     with TestClient(app) as c:
-        assert c.get("/all").status_code == 401                                   # eksik
-        assert c.get("/all", headers={"X-API-Key": "yanlis"}).status_code == 401   # gecersiz
+        assert c.get("/all").status_code == 401  # eksik
+        assert c.get("/all", headers={"X-API-Key": "yanlis"}).status_code == 401  # gecersiz
         assert c.get("/all", headers={"X-API-Key": "testkey"}).status_code == 200  # gecerli
 
 

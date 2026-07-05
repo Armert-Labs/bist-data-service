@@ -36,14 +36,24 @@ def _make_reference_provider():
     module_path, class_name = _PROVIDER_CLASS.get(REF_PROVIDER, _PROVIDER_CLASS["yahoo_chart"])
     module = importlib.import_module(module_path)
     return getattr(module, class_name)()
+
+
 DEFAULT_SYMBOLS = [
-    "THYAO", "GARAN", "AKBNK", "ASELS", "SISE",
-    "KCHOL", "TUPRS", "BIMAS", "EREGL", "FROTO",
+    "THYAO",
+    "GARAN",
+    "AKBNK",
+    "ASELS",
+    "SISE",
+    "KCHOL",
+    "TUPRS",
+    "BIMAS",
+    "EREGL",
+    "FROTO",
 ]
 
 # Esik degerleri (%)
-OK_THRESHOLD = 1.0     # < %1 fark: mukemmel uyum
-WARN_THRESHOLD = 5.0   # < %5: kabul edilebilir; >= %5: incelenmeli
+OK_THRESHOLD = 1.0  # < %1 fark: mukemmel uyum
+WARN_THRESHOLD = 5.0  # < %5: kabul edilebilir; >= %5: incelenmeli
 
 
 async def fetch_ours(symbols: list[str]) -> dict:
@@ -58,7 +68,7 @@ async def main(symbols: list[str]) -> int:
 
     try:
         ours = await fetch_ours(symbols)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"HATA: Bizim API'ye erisilemedi: {exc}")
         return 2
 
@@ -82,14 +92,18 @@ async def main(symbols: list[str]) -> int:
             dev = abs(op - ip) / ip * 100.0
             max_dev = max(max_dev, dev)
             compared += 1
-            status = "OK" if dev < OK_THRESHOLD else ("~ UYARI" if dev < WARN_THRESHOLD else "!! SAPMA")
+            status = (
+                "OK" if dev < OK_THRESHOLD else ("~ UYARI" if dev < WARN_THRESHOLD else "!! SAPMA")
+            )
             print(f"{sym:<8}{op:>14.4f}{ip:>14.4f}{dev:>9.2f}%  {status}")
         else:
             missing += 1
-            print(f"{sym:<8}{str(op):>14}{str(ip):>14}{'-':>10}  EKSIK (bir kaynakta yok)")
+            print(f"{sym:<8}{op!s:>14}{ip!s:>14}{'-':>10}  EKSIK (bir kaynakta yok)")
 
     print("-" * len(header))
-    print(f"Karsilastirilan: {compared}/{len(symbols)}  |  Eksik: {missing}  |  Maks sapma: %{max_dev:.2f}")
+    print(
+        f"Karsilastirilan: {compared}/{len(symbols)}  |  Eksik: {missing}  |  Maks sapma: %{max_dev:.2f}"
+    )
 
     if compared == 0:
         print("SONUC: KARSILASTIRILAMADI (kaynaklardan biri veri vermedi)")

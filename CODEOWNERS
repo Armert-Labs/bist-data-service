@@ -1,0 +1,10 @@
+# Varsayilan olarak tum depo icin kod sahipleri.
+# Bu kisiler/ekipler PR'larda otomatik reviewer olarak atanir.
+* @MertcanMert
+
+# Guvenlik/altyapi kritik alanlar
+/app/auth.py            @MertcanMert
+/app/providers/         @MertcanMert
+/.github/               @MertcanMert
+/Dockerfile             @MertcanMert
+/docker-compose.yml     @MertcanMert

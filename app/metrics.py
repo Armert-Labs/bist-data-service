@@ -22,5 +22,7 @@ SANITY_REJECTS = Counter("bist_sanity_rejects_total", "Sanity-check ile elenen a
 SSE_CLIENTS = Gauge("bist_sse_clients", "Aktif SSE baglanti sayisi")
 WEBHOOK_DELIVERIES = Counter("bist_webhook_deliveries_total", "Webhook gonderimleri", ["status"])
 
-CROSS_SOURCE_DRIFT = Gauge("bist_cross_source_drift_pct", "Son dogrulamada kaynaklar arasi maks fiyat sapmasi (%)")
+CROSS_SOURCE_DRIFT = Gauge(
+    "bist_cross_source_drift_pct", "Son dogrulamada kaynaklar arasi maks fiyat sapmasi (%)"
+)
 VALIDATION_CONSISTENT = Gauge("bist_validation_consistent", "Son dogrulama tutarli mi (1/0)")
