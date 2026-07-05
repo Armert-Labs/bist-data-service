@@ -25,6 +25,7 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import httpx
 
@@ -38,6 +39,17 @@ logger = logging.getLogger(__name__)
 _VALID_CONDITIONS = {"above", "below", "pct_up", "pct_down"}
 
 
+def _validate_webhook_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Webhook URL https olmali: {url!r}")
+    if settings.webhook_url_allowlist:
+        host = (parsed.hostname or "").lower()
+        allowed = {h.lower() for h in settings.webhook_url_allowlist}
+        if host not in allowed:
+            raise ValueError(f"Webhook host izin listesinde degil: {host!r}")
+
+
 class AlarmRule:
     def __init__(self, data: dict) -> None:
         self.id = str(data["id"])
@@ -47,6 +59,7 @@ class AlarmRule:
             raise ValueError(f"Gecersiz condition: {self.condition}")
         self.threshold = float(data["threshold"])
         self.url = str(data["url"])
+        _validate_webhook_url(self.url)
         self.cooldown = float(data.get("cooldown", 300))
         # -inf: henuz tetiklenmedi -> ilk uygun kosulda hemen hazir (monotonic
         # surec-goreli oldugundan 0.0 baslangici, servis acilisinda ilk cooldown

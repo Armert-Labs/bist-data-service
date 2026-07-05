@@ -1,12 +1,7 @@
 """Arka plan periyodik guncelleyici.
 
-Takip listesini batch'ler halinde aggregator uzerinden ceker, sanity-check
-icin onceki fiyatlari gecirir ve store'a yazar (store pub/sub yayinlar).
-
-Calisma modu:
-- Redis YOK  -> API sureci icinde calisir (tek process, in-memory store).
-- Redis VAR  -> ayri `updater_main` servisi olarak calisir; API yalnizca okur
-  (cok worker'da cift cekimi onlemek icin).
+Takip listesini batch'ler halinde pipeline uzerinden ceker ve store'a yazar.
+Drift monitörü periyodik capraz-kaynak kontrolu yapar.
 """
 
 from __future__ import annotations
@@ -15,13 +10,13 @@ import asyncio
 import contextlib
 import logging
 import time
-from datetime import UTC, datetime
 
 from . import metrics
 from . import symbols as sym
 from .aggregator import aggregator
 from .config import settings
 from .market import is_market_open, market_state
+from .pipeline import commit_quotes, run_drift_monitor
 from .store import Store, get_store
 
 logger = logging.getLogger(__name__)
@@ -33,6 +28,9 @@ class BackgroundUpdater:
         self._store: Store = store or get_store()
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._update_lock = asyncio.Lock()
+        self._update_running = False
+        self._cycle = 0
         self.running = False
 
     @property
@@ -41,7 +39,6 @@ class BackgroundUpdater:
 
     async def _update_once(self) -> int:
         state = market_state()
-
         current = await self._store.get_all()
         previous = {s: q.price for s, q in current.items() if q.price is not None}
 
@@ -54,10 +51,11 @@ class BackgroundUpdater:
                 break
             batch = self._symbols[start : start + batch_size]
             quotes = await aggregator.fetch_quotes(batch, previous=previous)
-            for quote in quotes.values():
-                quote.market_state = state
             if quotes:
-                await self._store.set_quotes(quotes)
+                await commit_quotes(self._store, quotes, market=state)
+                for s, q in quotes.items():
+                    if q.price is not None:
+                        previous[s] = q.price
                 total += len(quotes)
             await asyncio.sleep(settings.batch_pause)
 
@@ -73,19 +71,32 @@ class BackgroundUpdater:
 
     async def _refresh_age_metric(self) -> None:
         with contextlib.suppress(Exception):
-            lu = await self._store.last_update()
-            if lu is not None:
-                age = (datetime.now(UTC) - lu).total_seconds()
+            age = await self._store.oldest_update_age()
+            if age is not None:
                 metrics.LAST_UPDATE_AGE.set(age)
+                metrics.OLDEST_QUOTE_AGE.set(age)
 
     async def _loop(self) -> None:
         self.running = True
         first = True
         while not self._stop.is_set():
             try:
-                if first or settings.update_when_closed or is_market_open():
-                    await self._update_once()
-                    first = False
+                if settings.updater_skip_overlap and self._update_running:
+                    logger.warning("Onceki guncelleme turu devam ediyor; yeni tur atlandi.")
+                elif first or settings.update_when_closed or is_market_open():
+                    async with self._update_lock:
+                        self._update_running = True
+                        try:
+                            await self._update_once()
+                            first = False
+                            self._cycle += 1
+                            if (
+                                settings.drift_monitor_enabled
+                                and self._cycle % settings.drift_monitor_every_n_cycles == 0
+                            ):
+                                await run_drift_monitor(self._store)
+                        finally:
+                            self._update_running = False
                 else:
                     logger.debug("Piyasa kapali; guncelleme atlandi.")
                 await self._refresh_age_metric()

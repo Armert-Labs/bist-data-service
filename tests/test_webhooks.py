@@ -53,6 +53,25 @@ def test_invalid_condition_raises():
         _rule(condition="gecersiz")
 
 
+def test_http_url_rejected():
+    with pytest.raises(ValueError, match="https"):
+        _rule(url="http://hook.test/x")
+
+
+def test_allowlist_rejects_unknown_host(monkeypatch):
+    from dataclasses import replace
+
+    from app.config import settings
+
+    monkeypatch.setattr(
+        "app.webhooks.settings",
+        replace(settings, webhook_url_allowlist=["allowed.test"]),
+    )
+    with pytest.raises(ValueError, match="izin listesinde"):
+        _rule(url="https://hook.test/x")
+    _rule(url="https://allowed.test/x")  # gecerli
+
+
 def _manager(rules):
     import asyncio
 

@@ -146,10 +146,13 @@ def test_history_endpoint(monkeypatch):
 def test_quote_on_demand_fetch(monkeypatch):
     from app.models import Quote
 
-    async def fake_fetch(symbols, previous=None):
-        return {s: Quote(symbol=s, price=42.0) for s in symbols}
+    async def fake_commit(store, symbols, **kwargs):
+        quotes = {s: Quote(symbol=s, price=42.0) for s in symbols}
+        for q in quotes.values():
+            await store.set_quote(q.symbol, q)
+        return quotes
 
-    monkeypatch.setattr("app.main.aggregator.fetch_quotes", fake_fetch)
+    monkeypatch.setattr("app.main.fetch_and_commit", fake_commit)
     with TestClient(app) as c:
         body = c.get("/quote/THYAO").json()
         assert body["price"] == 42.0
@@ -159,11 +162,11 @@ def test_quote_negative_cache_prevents_upstream_hammering(monkeypatch):
     """Bulunamayan sembole tekrarli istekler upstream'e YALNIZCA BIR KEZ gitmeli."""
     calls = {"n": 0}
 
-    async def fake_fetch(symbols, previous=None):
+    async def fake_commit(store, symbols, **kwargs):
         calls["n"] += 1
-        return {}  # kaynaklarda yok
+        return {}
 
-    monkeypatch.setattr("app.main.aggregator.fetch_quotes", fake_fetch)
+    monkeypatch.setattr("app.main.fetch_and_commit", fake_commit)
     with TestClient(app) as c:
         for _ in range(5):
             assert c.get("/quote/ZZZZ").status_code == 404

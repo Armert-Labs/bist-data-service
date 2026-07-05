@@ -43,6 +43,7 @@ from .deps import fetch_semaphore, limiter, require_api_key
 from .logging_config import set_request_id, setup_logging
 from .market import is_market_open, market_state
 from .models import HistoryResponse, Quote
+from .pipeline import fetch_and_commit, fetch_quotes
 from .store import get_store
 from .updater import updater
 from .webhooks import webhook_manager
@@ -75,39 +76,18 @@ _sse_clients = 0
 # Bytes saklanir ki cache isabetinde 507 quote yeniden serialize edilmesin.
 _all_cache: dict[tuple[str, str], tuple[float, bytes]] = {}
 
-# Negatif onbellek: kaynaklarda BULUNAMAYAN semboller icin symbol -> monotonic
-# son kullanma. Ayni gecersiz sembole tekrarli istekler upstream'e gitmez
-# (Yahoo rate-limit'ine karsi kalkan; updater'in IP'sini korur).
-_negative_cache: dict[str, float] = {}
-_NEGATIVE_CACHE_MAX = 4096
-
-
-def _negative_cache_has(symbol: str) -> bool:
-    expiry = _negative_cache.get(symbol)
-    if expiry is None:
-        return False
-    if time.monotonic() >= expiry:
-        _negative_cache.pop(symbol, None)
-        return False
-    return True
-
-
-def _negative_cache_add(symbol: str) -> None:
-    if len(_negative_cache) >= _NEGATIVE_CACHE_MAX:
-        now = time.monotonic()
-        expired = [s for s, exp in _negative_cache.items() if exp <= now]
-        for s in expired:
-            _negative_cache.pop(s, None)
-        if len(_negative_cache) >= _NEGATIVE_CACHE_MAX:
-            _negative_cache.clear()  # kotu niyetli benzersiz-sembol seli: sifirla
-    _negative_cache[symbol] = time.monotonic() + settings.negative_cache_ttl
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Servis baslatiliyor (v%s), redis=%s", __version__, settings.redis_enabled)
 
     # Kimlik dogrulama durumu uyarilari (fail-safe farkindaligi)
+    if settings.production_mode and not registry.enabled:
+        raise RuntimeError(
+            "PRODUCTION_MODE=true ancak API anahtari tanimli degil. "
+            "API_KEYS veya API_KEYS_SHA256 ayarlayin."
+        )
+
     if settings.auth_required and not registry.enabled:
         logger.error("AUTH_REQUIRED=true ancak hic API anahtari yok! Veri uclari 503 donecek.")
     elif not registry.enabled:
@@ -226,20 +206,17 @@ async def _get_or_fetch(symbol: str) -> Quote | None:
     cached = await store.get_quote(symbol)
     if cached is not None:
         return cached
-    if _negative_cache_has(symbol):  # yakin zamanda bulunamadi; upstream'i dovme
+    if await store.negative_cache_has(symbol):
         return None
-    async with fetch_semaphore:  # bounded: thread-pool / DoS korumasi
-        # semaphore beklerken baskasi doldurmus olabilir:
+    async with fetch_semaphore:
         cached = await store.get_quote(symbol)
         if cached is not None:
             return cached
-        quotes = await aggregator.fetch_quotes([symbol])
+        quotes = await fetch_and_commit(store, [symbol], cross_validate=True)
     quote = quotes.get(symbol)
     if quote is None:
-        _negative_cache_add(symbol)
+        await store.negative_cache_add(symbol)
         return None
-    quote.market_state = market_state()
-    await store.set_quote(symbol, quote)
     return quote
 
 
@@ -289,6 +266,7 @@ async def ready() -> dict:
     size = await store.size() if store_ok else 0
     stale = await store.is_stale()
     age = await store.staleness_seconds()
+    oldest_age = age
     ready_flag = store_ok and size > 0 and not stale
 
     body = {
@@ -297,6 +275,7 @@ async def ready() -> dict:
         "quotes_cached": size,
         "is_stale": stale,
         "last_update_age_seconds": round(age, 1) if age is not None else None,
+        "oldest_quote_age_seconds": round(oldest_age, 1) if oldest_age is not None else None,
         "market_open": is_market_open(),
         "providers": aggregator.provider_states,
     }
@@ -404,18 +383,15 @@ async def get_quotes(
         }
 
     result = await store.get_quotes(requested)
-    missing = [s for s in requested if s not in result and not _negative_cache_has(s)]
+    missing = [s for s in requested if s not in result]
+    missing = [s for s in missing if not await store.negative_cache_has(s)]
     if missing:
         async with fetch_semaphore:
-            fetched = await aggregator.fetch_quotes(missing)
-        state = market_state()
-        for s, q in fetched.items():
-            q.market_state = state
-            await store.set_quote(s, q)
-            result[s] = q
+            fetched = await fetch_and_commit(store, missing, cross_validate=True)
+            result.update(fetched)
         for s in missing:
-            if s not in fetched:
-                _negative_cache_add(s)
+            if s not in result:
+                await store.negative_cache_add(s)
 
     return {
         "count": len(result),
@@ -447,11 +423,15 @@ async def get_history(
             status_code=400, detail=f"Gecersiz interval. Gecerli: {sorted(VALID_INTERVALS)}"
         )
 
-    result = await aggregator.fetch_history(sym.normalize(symbol), period, interval)
+    norm = sym.normalize(symbol)
+    cached = await store.get_history_cached(norm, period, interval)
+    if cached is not None and cached.bars:
+        return cached
+
+    result = await aggregator.fetch_history(norm, period, interval)
     if not result.bars:
-        raise HTTPException(
-            status_code=404, detail=f"Gecmis veri bulunamadi: {sym.normalize(symbol)}"
-        )
+        raise HTTPException(status_code=404, detail=f"Gecmis veri bulunamadi: {norm}")
+    await store.set_history_cached(norm, period, interval, result)
     return result
 
 
@@ -506,7 +486,7 @@ async def validate(
     missing = [s for s in syms if s not in primary]
     if missing:
         async with fetch_semaphore:
-            primary.update(await aggregator.fetch_quotes(missing))
+            primary.update(await fetch_quotes(store, missing, cross_validate=False))
 
     # Her bagimsiz referans kaynagi ayri ayri cek (biri erisilemezse digeri kalir).
     references: dict[str, dict] = {}
@@ -586,11 +566,12 @@ async def stream(
         raise HTTPException(status_code=503, detail="SSE baglanti limiti dolu.")
 
     requested = set(_parse_symbols(symbols))
+    symbol_filter = frozenset(requested) if requested else None
 
     def _filter(quotes: list[Quote]) -> dict[str, dict]:
         out: dict[str, dict] = {}
         for q in quotes:
-            if not requested or q.symbol in requested:
+            if symbol_filter is None or q.symbol in symbol_filter:
                 out[q.symbol] = q.model_dump(mode="json")
         return out
 
@@ -599,7 +580,6 @@ async def stream(
         _sse_clients += 1
         metrics.SSE_CLIENTS.set(_sse_clients)
         try:
-            # 1) Ilk snapshot
             initial = await store.get_all()
             snapshot = _filter(list(initial.values()))
             if snapshot:
@@ -608,8 +588,7 @@ async def stream(
                     "data": json.dumps({"market": market_state(), "quotes": snapshot}, default=str),
                 }
 
-            # 2) Canli akis (store pub/sub)
-            async for quotes in store.subscribe():
+            async for quotes in store.subscribe(symbol_filter):
                 if await request.is_disconnected():
                     break
                 payload = _filter(quotes)
@@ -632,6 +611,8 @@ async def stream(
 
 @app.get("/demo", response_class=HTMLResponse, tags=["Sistem"], summary="Canli test sayfasi")
 async def demo() -> str:
+    if not settings.demo_enabled:
+        raise HTTPException(status_code=404, detail="Demo devre disi.")
     return _DEMO_HTML
 
 
