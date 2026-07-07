@@ -17,6 +17,7 @@ Uc noktalar:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -27,6 +28,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -74,7 +76,14 @@ VALID_SORTS = {"symbol", "price", "change", "change_percent", "volume"}
 _sse_clients = 0
 # /all micro-cache: (sort, order) -> (monotonic_ts, serialize edilmis JSON bytes).
 # Bytes saklanir ki cache isabetinde 507 quote yeniden serialize edilmesin.
-_all_cache: dict[tuple[str, str, str], tuple[float, bytes]] = {}
+_all_cache: dict[tuple[str, str, str], tuple[float, bytes, str]] = {}
+
+
+def _all_response(request: Request, body: bytes, etag: str) -> Response:
+    """ETag'li /all yaniti: govde degismediyse 304 ile bant genisligi kazan."""
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(content=body, media_type="application/json", headers={"ETag": etag})
 
 
 def _with_live_state(q: Quote, state: str) -> Quote:
@@ -169,6 +178,9 @@ app = FastAPI(
 )
 
 # --- Middleware / eklentiler ---
+# ~500 sembollu /all govdesi JSON'da ~10x sikisir; SSE zaten stream oldugu icin
+# etkilenmez (yalnizca yeterince buyuk duz yanitlar sikistirilir).
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -194,10 +206,22 @@ else:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+def _rate_limit_window_seconds() -> int:
+    unit = settings.rate_limit.rsplit("/", 1)[-1].strip().lower()
+    return {"second": 1, "minute": 60, "hour": 3600, "day": 86400}.get(unit, 60)
+
+
 def _rate_limit_response():
     from fastapi.responses import JSONResponse
 
-    return JSONResponse(status_code=429, content={"detail": "Istek limiti asildi."})
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Istek limiti asildi."},
+        headers={
+            "Retry-After": str(_rate_limit_window_seconds()),
+            "X-RateLimit-Limit": settings.rate_limit,
+        },
+    )
 
 
 # Request-ID: kullanicidan gelen deger loga ve response'a yazildigi icin
@@ -292,13 +316,22 @@ async def ready() -> dict:
     """Readiness: store erisilebilir ve veri taze mi. (Trafik almaya hazir mi.)"""
     from datetime import UTC, datetime
 
-    store_ok = await store.ping()
-    size = await store.size() if store_ok else 0
-    stale = await store.is_stale()
-    oldest_age = await store.staleness_seconds()
-    fresh = await store.fresh_ratio()
-    last_update = await store.last_update()
-    last_age = (datetime.now(UTC) - last_update).total_seconds() if last_update else None
+    # Store (Redis) tamamen koptugunde bile sozlesmedeki yapisal 503 govdesi
+    # donmeli; ping ile cagri arasindaki yariska karsi tum erisim korunur.
+    size, stale, oldest_age, fresh, last_age = 0, True, None, None, None
+    try:
+        store_ok = await store.ping()
+        if store_ok:
+            size = await store.size()
+            stale = await store.is_stale()
+            oldest_age = await store.staleness_seconds()
+            fresh = await store.fresh_ratio()
+            last_update = await store.last_update()
+            last_age = (datetime.now(UTC) - last_update).total_seconds() if last_update else None
+    except Exception:
+        logger.exception("/ready store erisim hatasi")
+        store_ok = False
+        size, stale, oldest_age, fresh, last_age = 0, True, None, None, None
     ready_flag = store_ok and size > 0 and not stale
 
     body = {
@@ -334,6 +367,7 @@ async def list_symbols() -> dict:
     dependencies=[Depends(require_api_key)],
 )
 async def all_quotes(
+    request: Request,
     sort: str = Query(default="symbol", description="symbol|price|change|change_percent|volume"),
     order: str = Query(default="asc", description="asc|desc"),
 ) -> Response:
@@ -355,7 +389,7 @@ async def all_quotes(
     now = time.monotonic()
     hit = _all_cache.get(cache_key)
     if hit is not None and (now - hit[0]) < settings.all_cache_ttl:
-        return Response(content=hit[1], media_type="application/json")
+        return _all_response(request, hit[1], hit[2])
 
     data = await store.get_all()
     quotes = list(data.values())
@@ -379,8 +413,9 @@ async def all_quotes(
         "quotes": [_with_live_state(q, state).model_dump(mode="json") for q in quotes],
     }
     body = json.dumps(payload, default=str).encode("utf-8")
-    _all_cache[cache_key] = (now, body)
-    return Response(content=body, media_type="application/json")
+    etag = f'W/"{hashlib.sha256(body).hexdigest()[:16]}"'
+    _all_cache[cache_key] = (now, body, etag)
+    return _all_response(request, body, etag)
 
 
 @app.get(
@@ -416,6 +451,7 @@ async def get_quotes(
         return {
             "count": len(data),
             "market": state,
+            "missing": [],
             "quotes": {
                 s: _with_live_state(q, state).model_dump(mode="json") for s, q in data.items()
             },
@@ -436,6 +472,9 @@ async def get_quotes(
     return {
         "count": len(result),
         "market": state,
+        # Istemci 'sembol bulunamadi/veri gelmedi' durumunu sessiz atlama yerine
+        # acikca gorebilsin (negatif cache'tekiler de burada listelenir).
+        "missing": [s for s in requested if s not in result],
         "quotes": {
             s: _with_live_state(q, state).model_dump(mode="json") for s, q in result.items()
         },
@@ -573,18 +612,23 @@ async def validate(
                 row["references"][name] = {
                     "price": rp,
                     "deviation_pct": round(dev, 3),
-                    "ok": dev < 1.0,
+                    "ok": dev < settings.cross_validate_max_pct,
                 }
             else:
                 row["references"][name] = {"price": rp, "deviation_pct": None, "ok": False}
         comparisons.append(row)
 
-    consistent = any_compared and max_dev < 1.0
+    # Esik, yazma dogrulamasiyla ayni ayardan gelir; operator degistirdiginde
+    # /validate raporu ile pipeline ayni dilde konusur.
+    consistent = any_compared and max_dev < settings.cross_validate_max_pct
     metrics.CROSS_SOURCE_DRIFT.set(round(max_dev, 3))
     metrics.VALIDATION_CONSISTENT.set(1 if consistent else 0)
 
     return {
         "checked": len(syms),
+        # compared=false: 'tutarsiz' degil 'hicbir referansla KARSILASTIRILAMADI'.
+        "compared": any_compared,
+        "threshold_pct": settings.cross_validate_max_pct,
         "reference_status": reference_status,
         "max_deviation_pct": round(max_dev, 3),
         "consistent": consistent,

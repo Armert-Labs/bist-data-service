@@ -10,7 +10,6 @@ Ikisi de ayni async arayuzu uygular; kod store tipinden habersizdir.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import time
@@ -220,8 +219,11 @@ class MemoryStore(Store):
                 filtered = [q for q in quotes if q.symbol in sub.symbols]
             if not filtered:
                 continue
-            with contextlib.suppress(asyncio.QueueFull):
+            try:
                 sub.queue.put_nowait(filtered)
+            except asyncio.QueueFull:
+                # Yavas abone: olay dusuyor — sessiz kalmasin, metrikle gorunur olsun.
+                metrics.SSE_DROPPED_EVENTS.inc()
 
     def _persist(self, quotes: dict[str, Quote]) -> None:
         if not settings.persistence_enabled:

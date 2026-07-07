@@ -265,3 +265,99 @@ def test_ready_reports_freshness_fields():
         assert body["fresh_pct"] == 100.0
         assert body["last_update_age_seconds"] is not None
         assert body["last_update_age_seconds"] < 5
+
+
+def test_ready_returns_structured_503_when_store_down(monkeypatch):
+    """Redis coktugunde /ready 500 degil, yapisal 503 govdesi dondurmeli."""
+
+    async def dead_ping():
+        return False
+
+    async def boom():
+        raise ConnectionError("redis dead")
+
+    monkeypatch.setattr("app.main.store.ping", dead_ping)
+    monkeypatch.setattr("app.main.store.is_stale", boom)
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 503
+        assert r.json()["detail"]["store_ok"] is False
+
+
+def test_quotes_reports_missing_symbols(monkeypatch):
+    """Istemci 'sembol yok' ile 'veri gelmedi'yi ayirt edebilmeli."""
+    _seed_store()
+
+    async def fake_commit(store, symbols, **kw):
+        return {}
+
+    monkeypatch.setattr("app.main.fetch_and_commit", fake_commit)
+    with TestClient(app) as c:
+        body = c.get("/quotes", params={"symbols": "THYAO,ZZZZ"}).json()
+        assert body["count"] == 1
+        assert body["missing"] == ["ZZZZ"]
+
+
+def test_all_etag_304():
+    _seed_store()
+    with TestClient(app) as c:
+        r1 = c.get("/all")
+        etag = r1.headers.get("etag")
+        assert etag
+        r2 = c.get("/all", headers={"If-None-Match": etag})
+        assert r2.status_code == 304
+        assert r2.content == b""
+
+
+def test_all_gzip_encoding():
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    store = get_store()
+    now = datetime.now(UTC)
+    store._quotes = {
+        f"SYM{i:02d}": Quote(symbol=f"SYM{i:02d}", price=float(i + 1), updated_at=now)
+        for i in range(20)
+    }
+    store._last_update = now
+    with TestClient(app) as c:
+        r = c.get("/all", headers={"Accept-Encoding": "gzip"})
+        assert r.headers.get("content-encoding") == "gzip"
+
+
+def test_rate_limit_response_has_retry_after():
+    from app.main import _rate_limit_response
+
+    resp = _rate_limit_response()
+    assert resp.status_code == 429
+    assert resp.headers.get("Retry-After") == "60"  # default 120/minute -> 60 sn pencere
+
+
+def test_validate_reports_compared_flag(monkeypatch):
+    """Hicbir referansa erisilemezse 'tutarsiz' degil 'karsilastirilamadi' denmeli."""
+    _seed_store()
+    monkeypatch.setattr("app.main.aggregator.get_provider", lambda name: None)
+    with TestClient(app) as c:
+        body = c.get("/validate", params={"symbols": "THYAO"}).json()
+        assert body["compared"] is False
+
+
+def test_validate_threshold_from_settings(monkeypatch, override_settings):
+    from app.models import Quote
+
+    override_settings(cross_validate_max_pct=5.0)
+    _seed_store()
+
+    class FakeRef:
+        name = "yahoo_chart"
+
+        async def fetch_quotes(self, symbols):
+            return {s: Quote(symbol=s, price=334.0 * 1.03) for s in symbols}  # %3 sapma
+
+    monkeypatch.setattr("app.main.aggregator.get_provider", lambda name: FakeRef())
+    with TestClient(app) as c:
+        body = c.get("/validate", params={"symbols": "THYAO"}).json()
+        assert body["consistent"] is True  # %3 < %5 (esik artik ayardan)
+        assert body["threshold_pct"] == 5.0

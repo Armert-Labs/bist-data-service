@@ -34,6 +34,9 @@ UPDATE_CYCLE_TIMEOUTS = Counter(
 OLDEST_QUOTE_AGE = Gauge("bist_oldest_quote_age_seconds", "En eski sembol guncelleme yasi (sn)")
 
 SSE_CLIENTS = Gauge("bist_sse_clients", "Aktif SSE baglanti sayisi")
+SSE_DROPPED_EVENTS = Counter(
+    "bist_sse_dropped_events_total", "Yavas abone kuyrugu dolunca dusen pub/sub olaylari"
+)
 WEBHOOK_DELIVERIES = Counter("bist_webhook_deliveries_total", "Webhook gonderimleri", ["status"])
 
 CROSS_SOURCE_DRIFT = Gauge(

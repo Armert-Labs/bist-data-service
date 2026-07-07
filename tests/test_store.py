@@ -172,3 +172,26 @@ async def test_intraday_persistence():
     points = await store.get_intraday("THYAO")
     assert len(points) == 3
     assert points[-1]["p"] == 12.0
+
+
+async def test_publish_queue_full_counts_drops():
+    """Yavas abonede dusen olaylar sessiz kalmamali (metrik artmali)."""
+    from app import metrics as m
+
+    store = MemoryStore()
+    await store.connect()
+    gen = store.subscribe()
+    first = asyncio.create_task(gen.__anext__())
+    await asyncio.sleep(0.01)  # abone kaydi olussun
+
+    before = m.SSE_DROPPED_EVENTS._value.get()
+    for i in range(120):  # kuyruk maxsize=100; fazlasi dusmeli
+        await store.set_quote("THYAO", Quote(symbol="THYAO", price=float(i + 1)))
+    assert m.SSE_DROPPED_EVENTS._value.get() > before
+
+    import contextlib
+
+    first.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await first
+    await gen.aclose()
