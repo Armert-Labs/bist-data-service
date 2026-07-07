@@ -76,3 +76,15 @@ async def test_pubsub_roundtrip():
     except TimeoutError:
         task.cancel()
     assert "THYAO" in received
+
+
+async def test_ping_false_when_redis_down():
+    """Redis erisilemezken ping() exception degil False dondurmeli."""
+
+    class DeadRedis:
+        async def ping(self):
+            raise ConnectionError("baglanti yok")
+
+    store = RedisStore("redis://fake", "test")
+    store._redis = DeadRedis()
+    assert await store.ping() is False

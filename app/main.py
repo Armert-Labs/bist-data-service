@@ -637,6 +637,40 @@ async def validate(
     }
 
 
+async def _stream_generator(request: Request, symbol_filter: frozenset[str] | None):
+    """SSE olay ureticisi: once tam snapshot, sonra pub/sub akisi.
+
+    Modul seviyesinde: TestClient uzerinden test edilemiyor (subscribe'da
+    bloklanan generator kapanista iptal edilemiyor); dogrudan test edilir.
+    """
+    global _sse_clients
+    _sse_clients += 1
+    metrics.SSE_CLIENTS.set(_sse_clients)
+    try:
+        state = market_state()
+        initial = await store.get_all()
+        snapshot = _sse_quotes_payload(list(initial.values()), symbol_filter, state)
+        if snapshot:
+            yield {
+                "event": "quotes",
+                "data": json.dumps({"market": state, "quotes": snapshot}, default=str),
+            }
+
+        async for quotes in store.subscribe(symbol_filter):
+            if await request.is_disconnected():
+                break
+            state = market_state()
+            payload = _sse_quotes_payload(quotes, symbol_filter, state)
+            if payload:
+                yield {
+                    "event": "quotes",
+                    "data": json.dumps({"market": state, "quotes": payload}, default=str),
+                }
+    finally:
+        _sse_clients -= 1
+        metrics.SSE_CLIENTS.set(_sse_clients)
+
+
 @app.get(
     "/stream",
     tags=["Akis"],
@@ -647,45 +681,16 @@ async def stream(
     request: Request,
     symbols: str | None = Query(default=None, description="Virgulle ayrilmis; bos ise tum liste"),
 ) -> EventSourceResponse:
-    global _sse_clients
     if _sse_clients >= settings.max_sse_clients:
         raise HTTPException(status_code=503, detail="SSE baglanti limiti dolu.")
 
     requested = set(_parse_symbols(symbols))
     symbol_filter = frozenset(requested) if requested else None
 
-    async def event_generator():
-        global _sse_clients
-        _sse_clients += 1
-        metrics.SSE_CLIENTS.set(_sse_clients)
-        try:
-            state = market_state()
-            initial = await store.get_all()
-            snapshot = _sse_quotes_payload(list(initial.values()), symbol_filter, state)
-            if snapshot:
-                yield {
-                    "event": "quotes",
-                    "data": json.dumps({"market": state, "quotes": snapshot}, default=str),
-                }
-
-            async for quotes in store.subscribe(symbol_filter):
-                if await request.is_disconnected():
-                    break
-                state = market_state()
-                payload = _sse_quotes_payload(quotes, symbol_filter, state)
-                if payload:
-                    yield {
-                        "event": "quotes",
-                        "data": json.dumps({"market": state, "quotes": payload}, default=str),
-                    }
-        finally:
-            _sse_clients -= 1
-            metrics.SSE_CLIENTS.set(_sse_clients)
-
     # ping birimi SANIYEDIR (sse-starlette): 15 sn'de bir keep-alive yorumu
     # gonderilir; market kapaliyken (veri akmazken) proxy idle-timeout'larinin
     # baglantiyi koparmasini onler. (Onceki deger 15000 idi = ~4 saat.)
-    return EventSourceResponse(event_generator(), ping=15)
+    return EventSourceResponse(_stream_generator(request, symbol_filter), ping=15)
 
 
 @app.get("/demo", response_class=HTMLResponse, tags=["Sistem"], summary="Canli test sayfasi")

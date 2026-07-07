@@ -195,3 +195,19 @@ async def test_history_falls_back_to_source_with_bars():
     agg = _agg([FakeProvider("yahoo"), WithBars("isyatirim")])
     res = await agg.fetch_history("THYAO", "1mo", "1d")
     assert len(res.bars) == 1
+
+
+async def test_open_breaker_skips_provider():
+    primary = FakeProvider("yahoo", {"THYAO": Quote(symbol="THYAO", price=100.0)})
+    backup = FakeProvider("isyatirim", {"THYAO": Quote(symbol="THYAO", price=99.0)})
+    agg = _agg([primary, backup])
+    agg._providers[0][1].allow = lambda: False  # devre acik
+    res = await agg.fetch_quotes(["THYAO"])
+    assert primary.calls == 0  # hic sorulmadi
+    assert res["THYAO"].price == 99.0
+
+
+async def test_all_providers_failing_returns_empty():
+    agg = _agg([FakeProvider("yahoo", fail=True), FakeProvider("isyatirim", fail=True)])
+    res = await agg.fetch_quotes(["THYAO"])
+    assert res == {}  # exception yukari sizmaz, mevcut store verisi korunur

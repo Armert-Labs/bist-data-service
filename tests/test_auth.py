@@ -72,3 +72,31 @@ def test_production_mode_starts_with_auth_and_keys(override_settings, monkeypatc
     monkeypatch.setattr(registry, "_entries", [("testkey", "test", False)])
     with TestClient(app) as c:
         assert c.get("/health").status_code == 200
+
+
+PROTECTED_PATHS = [
+    "/all",
+    "/quote/THYAO",
+    "/quotes",
+    "/history/THYAO",
+    "/intraday/THYAO",
+    "/symbols",
+    "/validate",
+    "/stream",
+]
+
+
+@pytest.mark.parametrize("path", PROTECTED_PATHS)
+def test_every_data_endpoint_requires_key(monkeypatch, path):
+    """Bir endpoint'ten require_api_key yanlislikla kaldirilirsa CI yakalasin."""
+    monkeypatch.setattr(registry, "_entries", [("testkey", "test", False)])
+    with TestClient(app) as c:
+        assert c.get(path).status_code == 401
+
+
+def test_auth_required_without_keys_returns_503(override_settings, monkeypatch):
+    """Fail-safe: AUTH_REQUIRED=true + anahtar yok -> veri uclari 503 (acik kalmaz)."""
+    override_settings(auth_required=True)
+    monkeypatch.setattr(registry, "_entries", [])
+    with TestClient(app) as c:
+        assert c.get("/all").status_code == 503

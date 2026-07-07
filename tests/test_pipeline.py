@@ -47,3 +47,24 @@ async def test_cross_validate_rejects_drift(monkeypatch):
     quotes = {"THYAO": Quote(symbol="THYAO", price=100.0)}
     out = await cross_validate_quotes(quotes)
     assert "THYAO" not in out
+
+
+async def test_fetch_and_commit_stamps_and_persists(monkeypatch):
+    """Gercek zincir: fetch -> commit -> store'da updated_at + market_state."""
+    from app.pipeline import fetch_and_commit
+    from app.store import MemoryStore
+
+    store = MemoryStore()
+    await store.connect()
+
+    async def fake_agg_fetch(symbols, previous=None):
+        return {s: Quote(symbol=s, price=10.0) for s in symbols}
+
+    monkeypatch.setattr("app.pipeline.aggregator.fetch_quotes", fake_agg_fetch)
+    quotes = await fetch_and_commit(store, ["THYAO"], cross_validate=False)
+    assert quotes["THYAO"].price == 10.0
+
+    got = await store.get_quote("THYAO")
+    assert got is not None
+    assert got.updated_at is not None
+    assert got.market_state in ("OPEN", "CLOSED")

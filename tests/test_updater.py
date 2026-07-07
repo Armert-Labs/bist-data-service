@@ -84,3 +84,28 @@ async def test_run_cycle_runs_update(monkeypatch, override_settings):
     ok = await up._run_cycle()
     assert ok is True
     assert called == [1]
+
+
+async def test_loop_survives_update_exception(monkeypatch, override_settings):
+    """_update_once patlasa bile 7/24 dongusu olmemeli, sonraki turda devam etmeli."""
+    override_settings(update_interval=0.01, update_when_closed=True, updater_cycle_timeout=5.0)
+    store = MemoryStore()
+    await store.connect()
+    up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
+
+    calls = {"n": 0}
+
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("beklenmeyen patlama")
+        return 0
+
+    monkeypatch.setattr(up, "_update_once", flaky)
+    up.start()
+    for _ in range(300):
+        if calls["n"] >= 2:
+            break
+        await asyncio.sleep(0.01)
+    await up.stop()
+    assert calls["n"] >= 2  # hatadan sonra dongu devam etti
