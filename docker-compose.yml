@@ -50,5 +50,16 @@ services:
       redis:
         condition: service_healthy
 
+  # Armert x Bisteyes veri kontrol paneli (statik; API'yi tarayicidan tuketir).
+  panel:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./dashboard:/usr/share/nginx/html:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
 volumes:
   redis-data:

@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ARMERT × BISTEYES — BIST Veri Kontrol</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath d='M4 24 C12 10, 36 10, 44 24 C36 38, 12 38, 4 24 Z' stroke='%232DD4BF' stroke-width='3' fill='%230B0F17'/%3E%3Ccircle cx='24' cy='24' r='10' stroke='%230D9488' stroke-width='2.5' fill='none'/%3E%3Ccircle cx='24' cy='24' r='4.5' fill='%23F5A623'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+:root {
+  --bg: #0B0F17;
+  --panel: #10161F;
+  --panel-2: #141C28;
+  --line: #1D2836;
+  --ink: #E8ECF4;
+  --ink-2: #94A0B4;
+  --ink-3: #5B6778;
+  --armert: #B8770A;
+  --armert-hi: #F5A623;
+  --teal: #0D9488;
+  --teal-hi: #2DD4BF;
+  --up: #059669;
+  --up-hi: #34D399;
+  --down: #DC2626;
+  --down-hi: #F87171;
+  --warn: #B8770A;
+  --radius: 10px;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --disp: "Sora", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--disp);
+  font-size: 14px;
+  min-height: 100vh;
+  position: relative;
+}
+/* Atmosfer: cift-marka duotone isik + tanecik dokusu */
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(900px 380px at 12% -8%, rgba(13,148,136,.16), transparent 60%),
+    radial-gradient(700px 320px at 88% -10%, rgba(184,119,10,.13), transparent 60%);
+}
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: .05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E");
+}
+.wrap { position: relative; z-index: 1; max-width: 1360px; margin: 0 auto; padding: 0 20px 48px; }
+
+/* ---------- Header ---------- */
+header {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 20px 0 16px; border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.eye { width: 44px; height: 44px; flex: none; }
+.eye .lid { animation: blink 9s infinite; transform-origin: 50% 50%; }
+.eye .pupil { transition: r .18s ease; }
+.eye.tick .pupil { animation: pulse .5s ease; }
+@keyframes pulse { 0% { r: 4.5; } 35% { r: 7.5; } 100% { r: 4.5; } }
+@keyframes blink { 0%, 94%, 100% { transform: scaleY(1);} 96.5% { transform: scaleY(.06);} }
+.lockup { line-height: 1.05; }
+.lockup .l1 { font-weight: 800; font-size: 19px; letter-spacing: .14em; }
+.lockup .l1 .a { color: var(--armert-hi); }
+.lockup .l1 .x { color: var(--ink-3); font-weight: 400; padding: 0 4px; }
+.lockup .l1 .b { color: var(--teal-hi); }
+.lockup .l2 { color: var(--ink-2); font-size: 11.5px; letter-spacing: .28em; margin-top: 3px; text-transform: uppercase; }
+.spacer { flex: 1; }
+.hstat { display: flex; align-items: center; gap: 14px; font-family: var(--mono); font-size: 12.5px; }
+.livebadge { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; background: var(--panel); }
+.livebadge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--down-hi); }
+.livebadge.on .dot { background: var(--up-hi); box-shadow: 0 0 8px rgba(52,211,153,.7); }
+.clock { color: var(--ink-2); }
+.gear { background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer; font-family: var(--disp); }
+.gear:hover { color: var(--ink); border-color: var(--teal); }
+
+/* ---------- Baglanti karti ---------- */
+.conn { margin: 18px 0 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: none; }
+.conn.open { display: block; }
+.conn h3 { margin: 0 0 12px; font-size: 14px; letter-spacing: .04em; }
+.conn .row { display: flex; gap: 10px; flex-wrap: wrap; }
+.conn input { flex: 1; min-width: 220px; background: #0D1420; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); padding: 9px 12px; font-family: var(--mono); font-size: 13px; }
+.conn input:focus { outline: none; border-color: var(--teal); }
+.conn button { background: var(--teal); color: #04110F; font-weight: 600; border: 0; border-radius: 8px; padding: 9px 18px; cursor: pointer; font-family: var(--disp); }
+.conn button:hover { background: var(--teal-hi); }
+.conn .hint { color: var(--ink-3); font-size: 12px; margin-top: 10px; }
+
+/* ---------- KPI satiri ---------- */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 20px 0; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: var(--radius); padding: 13px 15px 12px; }
+.kpi .lbl { color: var(--ink-2); font-size: 11px; letter-spacing: .16em; text-transform: uppercase; display: flex; align-items: center; gap: 7px; }
+.kpi .val { font-family: var(--mono); font-weight: 600; font-size: 25px; margin-top: 7px; font-variant-numeric: tabular-nums; }
+.kpi .sub { color: var(--ink-3); font-size: 11.5px; margin-top: 4px; font-family: var(--mono); }
+.kpi.ok   { border-left-color: var(--up); }
+.kpi.bad  { border-left-color: var(--down); }
+.kpi.warn { border-left-color: var(--armert); }
+.kpi .sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); flex: none; }
+.kpi.ok .sdot { background: var(--up-hi); } .kpi.bad .sdot { background: var(--down-hi); } .kpi.warn .sdot { background: var(--armert-hi); }
+
+/* ---------- Ana izgara ---------- */
+.main { display: grid; grid-template-columns: minmax(0, 2.1fr) minmax(280px, 1fr); gap: 14px; align-items: start; }
+@media (max-width: 980px) { .main { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.card > .chead { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.card > .chead h2 { margin: 0; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-2); font-weight: 600; }
+.card > .chead .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* Tablo */
+.filter { background: #0D1420; border: 1px solid var(--line); border-radius: 7px; color: var(--ink); padding: 6px 10px; font-family: var(--mono); font-size: 12.5px; width: 190px; }
+.filter:focus { outline: none; border-color: var(--teal); }
+.tblwrap { overflow-x: auto; max-height: 62vh; overflow-y: auto; }
+table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13px; }
+thead th {
+  position: sticky; top: 0; background: var(--panel-2); color: var(--ink-2); font-weight: 500;
+  text-align: right; padding: 9px 14px; font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  cursor: pointer; user-select: none; white-space: nowrap; z-index: 2;
+}
+thead th:first-child { text-align: left; }
+thead th .arr { color: var(--teal-hi); }
+tbody td { text-align: right; padding: 8px 14px; border-bottom: 1px solid #131A25; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tbody td:first-child { text-align: left; font-weight: 600; cursor: pointer; }
+tbody tr:hover { background: #121A27; }
+tbody tr.sel td:first-child { color: var(--teal-hi); }
+td.chg { display: flex; justify-content: flex-end; }
+.chip { display: inline-flex; align-items: center; gap: 5px; border-radius: 6px; padding: 2px 8px; font-size: 12.5px; }
+.chip.up   { color: var(--up-hi);  background: rgba(5,150,105,.12); }
+.chip.down { color: var(--down-hi); background: rgba(220,38,38,.12); }
+.chip.flat { color: var(--ink-2); background: rgba(148,160,180,.08); }
+tr.fl-up   { animation: flup .8s ease; } tr.fl-down { animation: fldown .8s ease; }
+@keyframes flup   { from { background: rgba(5,150,105,.22); } to { background: transparent; } }
+@keyframes fldown { from { background: rgba(220,38,38,.20); } to { background: transparent; } }
+.agecell { color: var(--ink-3); font-size: 12px; }
+
+/* Sag sutun */
+.side { display: flex; flex-direction: column; gap: 14px; }
+.spark { padding: 14px 16px 10px; }
+.spark .sym { font-family: var(--mono); font-weight: 600; font-size: 15px; }
+.spark .px { font-family: var(--mono); font-size: 26px; font-weight: 600; margin: 2px 0 6px; font-variant-numeric: tabular-nums; }
+.spark svg { width: 100%; height: 88px; display: block; }
+.spark .mm { display: flex; justify-content: space-between; color: var(--ink-3); font-family: var(--mono); font-size: 11px; margin-top: 4px; }
+.provs { padding: 12px 16px; display: flex; flex-direction: column; gap: 9px; }
+.prov { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 13px; }
+.prov .pdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
+.prov.ok .pdot { background: var(--up-hi); } .prov.open .pdot { background: var(--down-hi); } .prov.half .pdot { background: var(--armert-hi); }
+.prov .pstate { margin-left: auto; color: var(--ink-3); font-size: 11.5px; letter-spacing: .06em; }
+.log { padding: 8px 0; max-height: 240px; overflow-y: auto; }
+.log .ln { display: flex; gap: 10px; padding: 4px 16px; font-family: var(--mono); font-size: 11.8px; color: var(--ink-2); }
+.log .ln .t { color: var(--ink-3); flex: none; }
+.log .ln.err { color: var(--down-hi); } .log .ln.good { color: var(--up-hi); } .log .ln.warn { color: var(--armert-hi); }
+
+footer { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; gap: 8px; align-items: center; color: var(--ink-3); font-size: 12px; font-family: var(--mono); }
+footer .v { margin-left: auto; }
+a { color: var(--teal-hi); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="brand">
+    <svg class="eye" id="eye" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <g class="lid">
+        <path d="M4 24 C12 10, 36 10, 44 24 C36 38, 12 38, 4 24 Z" stroke="#2DD4BF" stroke-width="2.2" fill="rgba(13,148,136,.08)"/>
+        <circle cx="24" cy="24" r="10.5" stroke="#0D9488" stroke-width="2"/>
+        <circle class="pupil" cx="24" cy="24" r="4.5" fill="#F5A623"/>
+        <path d="M8 24 C14 30, 20 32, 24 32" stroke="#0D9488" stroke-width="1" opacity=".4"/>
+      </g>
+    </svg>
+    <div class="lockup">
+      <div class="l1"><span class="a">ARMERT</span><span class="x">×</span><span class="b">BISTEYES</span></div>
+      <div class="l2">BIST Veri Kontrol Paneli</div>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <div class="hstat">
+    <span class="livebadge" id="livebadge"><span class="dot"></span><span id="livetext">BAGLANIYOR</span></span>
+    <span class="clock" id="clock">--:--:--</span>
+    <button class="gear" id="gear" title="Baglanti ayarlari">⚙ Ayarlar</button>
+  </div>
+</header>
+
+<section class="conn" id="conn">
+  <h3>Baglanti Ayarlari</h3>
+  <div class="row">
+    <input id="apiBase" placeholder="API adresi — orn. http://sunucu:8000" />
+    <input id="apiKey" placeholder="API anahtari (X-API-Key)" type="password" />
+    <button id="connectBtn">Baglan</button>
+  </div>
+  <div class="hint">Anahtar yalnizca bu tarayicida (localStorage) saklanir. SSE dahil tum istekler X-API-Key basligiyla gider.</div>
+</section>
+
+<section class="kpis">
+  <div class="kpi" id="k-ready"><div class="lbl"><span class="sdot"></span>Servis</div><div class="val" id="v-ready">—</div><div class="sub" id="s-ready">/ready bekleniyor</div></div>
+  <div class="kpi" id="k-fresh"><div class="lbl"><span class="sdot"></span>Tazelik</div><div class="val" id="v-fresh">—</div><div class="sub" id="s-fresh">taze sembol orani</div></div>
+  <div class="kpi" id="k-age"><div class="lbl"><span class="sdot"></span>Veri Yasi</div><div class="val" id="v-age">—</div><div class="sub" id="s-age">son guncellemeden beri</div></div>
+  <div class="kpi" id="k-market"><div class="lbl"><span class="sdot"></span>Piyasa</div><div class="val" id="v-market">—</div><div class="sub">BIST seansi 10:00–18:15</div></div>
+  <div class="kpi" id="k-drift"><div class="lbl"><span class="sdot"></span>Sapma</div><div class="val" id="v-drift">—</div><div class="sub" id="s-drift">kaynaklar arasi (/validate)</div></div>
+  <div class="kpi" id="k-cache"><div class="lbl"><span class="sdot"></span>Onbellek</div><div class="val" id="v-cache">—</div><div class="sub">sembol sayisi</div></div>
+</section>
+
+<div class="main">
+  <div class="card">
+    <div class="chead">
+      <h2>Canli Fiyatlar</h2>
+      <span id="tickinfo" style="color:var(--ink-3);font-family:var(--mono);font-size:11.5px;"></span>
+      <div class="right"><input class="filter" id="filter" placeholder="filtrele: THYAO…" /></div>
+    </div>
+    <div class="tblwrap">
+      <table>
+        <thead><tr>
+          <th data-k="symbol">Sembol</th>
+          <th data-k="price">Fiyat</th>
+          <th data-k="change">Degisim</th>
+          <th data-k="change_percent">%</th>
+          <th data-k="volume">Hacim</th>
+          <th data-k="age">Yas</th>
+        </tr></thead>
+        <tbody id="tbody"><tr><td colspan="6" style="text-align:center;color:var(--ink-3);padding:26px;">veri bekleniyor…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="card spark" id="sparkcard">
+      <div class="sym" id="sp-sym">Sembol secin</div>
+      <div class="px" id="sp-px">—</div>
+      <svg id="sp-svg" viewBox="0 0 300 88" preserveAspectRatio="none"></svg>
+      <div class="mm"><span id="sp-min"></span><span id="sp-note">tabloda bir sembole tiklayin</span><span id="sp-max"></span></div>
+    </div>
+    <div class="card">
+      <div class="chead"><h2>Veri Kaynaklari</h2></div>
+      <div class="provs" id="provs"><div class="prov"><span class="pdot"></span>bekleniyor…</div></div>
+    </div>
+    <div class="card">
+      <div class="chead"><h2>Olay Akisi</h2></div>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <span>© Armert Labs — Bisteyes veri gozetim ekrani</span>
+  <span class="v" id="version"></span>
+</footer>
+</div>
+
+<script>
+"use strict";
+/* ---------- durum ---------- */
+const LS = { base: "bisteyes.apiBase", key: "bisteyes.apiKey" };
+const state = {
+  base: localStorage.getItem(LS.base) || (location.protocol.startsWith("http") ? location.protocol + "//" + location.hostname + ":8000" : "http://localhost:8000"),
+  key: localStorage.getItem(LS.key) || "",
+  quotes: new Map(),
+  sort: { k: "symbol", dir: 1 },
+  filter: "",
+  selected: null,
+  sseAbort: null,
+  backoff: 1000,
+  ticks: 0,
+};
+const $ = (id) => document.getElementById(id);
+const fmt = new Intl.NumberFormat("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtInt = new Intl.NumberFormat("tr-TR");
+
+function headers() {
+  const h = { "Accept": "application/json" };
+  if (state.key) h["X-API-Key"] = state.key;
+  return h;
+}
+async function api(path) {
+  const r = await fetch(state.base + path, { headers: headers() });
+  if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
+  return r.json();
+}
+function log(msg, cls) {
+  const el = document.createElement("div");
+  el.className = "ln" + (cls ? " " + cls : "");
+  const t = new Date().toLocaleTimeString("tr-TR", { hour12: false });
+  el.innerHTML = '<span class="t">' + t + "</span><span></span>";
+  el.lastChild.textContent = msg;
+  const box = $("log");
+  box.prepend(el);
+  while (box.children.length > 50) box.removeChild(box.lastChild);
+}
+
+/* ---------- ayarlar ---------- */
+function openConn(open) { $("conn").classList.toggle("open", open); }
+$("gear").onclick = () => openConn(!$("conn").classList.contains("open"));
+$("connectBtn").onclick = () => {
+  state.base = $("apiBase").value.trim().replace(/\/+$/, "") || state.base;
+  state.key = $("apiKey").value;
+  localStorage.setItem(LS.base, state.base);
+  localStorage.setItem(LS.key, state.key);
+  openConn(false);
+  log("Ayarlar kaydedildi: " + state.base, "good");
+  restartAll();
+};
+$("apiBase").value = state.base;
+$("apiKey").value = state.key;
+if (!localStorage.getItem(LS.base)) openConn(true);
+
+/* ---------- saat ---------- */
+setInterval(() => {
+  const tr = new Date(Date.now() + (3 * 3600 + new Date().getTimezoneOffset() * 60) * 1000);
+  $("clock").textContent = tr.toLocaleTimeString("tr-TR", { hour12: false }) + " TRT";
+}, 1000);
+
+/* ---------- KPI ---------- */
+function setKpi(id, cls, val, sub) {
+  const k = $("k-" + id);
+  k.className = "kpi" + (cls ? " " + cls : "");
+  $("v-" + id).textContent = val;
+  if (sub !== undefined) $("s-" + id) && ($("s-" + id).textContent = sub);
+}
+async function pollReady() {
+  try {
+    const r = await fetch(state.base + "/ready", { headers: headers() });
+    const j = await r.json();
+    const d = j.detail || j; // 503'te govde detail icinde
+    setKpi("ready", d.ready ? "ok" : "bad", d.ready ? "HAZIR" : "DEGIL", d.store_ok ? "store: ok" : "store: HATA");
+    if (d.fresh_pct != null) setKpi("fresh", d.fresh_pct >= 90 ? "ok" : d.fresh_pct >= 70 ? "warn" : "bad", "%" + fmt.format(d.fresh_pct), (d.quotes_cached ?? "—") + " sembolun tazeligi");
+    if (d.last_update_age_seconds != null) {
+      const a = d.last_update_age_seconds;
+      setKpi("age", a < 180 ? "ok" : a < 400 ? "warn" : "bad", a < 120 ? Math.round(a) + " sn" : Math.round(a / 60) + " dk", "en eski: " + (d.oldest_quote_age_seconds != null ? Math.round(d.oldest_quote_age_seconds / 60) + " dk" : "—"));
+    }
+    setKpi("market", d.market_open ? "ok" : "", d.market_open ? "ACIK" : "KAPALI");
+    setKpi("cache", (d.quotes_cached ?? 0) > 0 ? "ok" : "bad", fmtInt.format(d.quotes_cached ?? 0));
+    renderProviders(d.providers || {});
+  } catch (e) {
+    setKpi("ready", "bad", "ERISIM YOK", String(e.message || e));
+    log("/ready erisilemedi: " + e.message, "err");
+  }
+}
+function renderProviders(p) {
+  const box = $("provs");
+  const names = Object.keys(p);
+  if (!names.length) return;
+  const map = { closed: ["ok", "SAGLIKLI"], open: ["open", "DEVRE DISI"], half_open: ["half", "TOPARLANIYOR"] };
+  box.innerHTML = "";
+  for (const n of names) {
+    const [cls, label] = map[p[n]] || ["", p[n]];
+    const el = document.createElement("div");
+    el.className = "prov " + cls;
+    el.innerHTML = '<span class="pdot"></span><span></span><span class="pstate"></span>';
+    el.children[1].textContent = n;
+    el.children[2].textContent = label;
+    box.appendChild(el);
+  }
+}
+async function pollValidate() {
+  try {
+    const j = await api("/validate?symbols=THYAO,GARAN,AKBNK");
+    if (!j.compared) { setKpi("drift", "warn", "N/A", "referans erisilemedi"); return; }
+    const cls = j.consistent ? "ok" : "bad";
+    setKpi("drift", cls, "%" + fmt.format(j.max_deviation_pct), "esik %" + j.threshold_pct + (j.consistent ? " — tutarli" : " — TUTARSIZ"));
+    if (!j.consistent) log("Kaynaklar arasi sapma esigi asildi: %" + j.max_deviation_pct, "warn");
+  } catch (e) { log("/validate hatasi: " + e.message, "err"); }
+}
+async function pollHealth() {
+  try { const j = await api("/health"); $("version").textContent = "api v" + j.version; }
+  catch { /* /ready zaten alarm verir */ }
+}
+
+/* ---------- SSE (fetch-stream: EventSource header gonderemez) ---------- */
+async function startSSE() {
+  if (state.sseAbort) state.sseAbort.abort();
+  const ctrl = new AbortController();
+  state.sseAbort = ctrl;
+  const badge = $("livebadge");
+  try {
+    const resp = await fetch(state.base + "/stream", { headers: headers(), signal: ctrl.signal });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    badge.classList.add("on"); $("livetext").textContent = "CANLI";
+    state.backoff = 1000;
+    log("SSE akisi baglandi", "good");
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      // SSE satir sonu \r\n olabilir (sse-starlette oyle gonderir) — normalize et.
+      buf = (buf + dec.decode(value, { stream: true })).replace(/\r\n/g, "\n");
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
+        if (dataLine) handleEvent(JSON.parse(dataLine.slice(5)));
+      }
+    }
+    throw new Error("akis sonlandi");
+  } catch (e) {
+    if (ctrl.signal.aborted) return;
+    badge.classList.remove("on"); $("livetext").textContent = "KOPTU";
+    log("SSE koptu (" + (e.message || e) + "); " + Math.round(state.backoff / 1000) + " sn sonra tekrar", "err");
+    setTimeout(() => { if (!ctrl.signal.aborted) startSSE(); }, state.backoff);
+    state.backoff = Math.min(state.backoff * 2, 15000);
+  }
+}
+function handleEvent(payload) {
+  state.ticks++;
+  const eye = $("eye");
+  eye.classList.remove("tick"); void eye.getBoundingClientRect(); eye.classList.add("tick");
+  const changed = [];
+  for (const [sym, q] of Object.entries(payload.quotes || {})) {
+    const old = state.quotes.get(sym);
+    if (old && q.price != null && old.price !== q.price) changed.push([sym, q.price > old.price ? "fl-up" : "fl-down"]);
+    state.quotes.set(sym, q);
+  }
+  $("tickinfo").textContent = state.ticks + " olay · " + state.quotes.size + " sembol";
+  renderTable(new Map(changed));
+  if (state.selected && payload.quotes && payload.quotes[state.selected]) updateSparkHead();
+}
+
+/* ---------- tablo ---------- */
+document.querySelectorAll("thead th").forEach((th) => {
+  th.onclick = () => {
+    const k = th.dataset.k;
+    if (state.sort.k === k) state.sort.dir *= -1; else state.sort = { k, dir: k === "symbol" ? 1 : -1 };
+    renderTable();
+  };
+});
+$("filter").oninput = (e) => { state.filter = e.target.value.trim().toUpperCase(); renderTable(); };
+function ageOf(q) { return q.updated_at ? (Date.now() - new Date(q.updated_at).getTime()) / 1000 : null; }
+function renderTable(flash) {
+  const k = state.sort.k, dir = state.sort.dir;
+  let rows = [...state.quotes.values()];
+  if (state.filter) rows = rows.filter((q) => q.symbol.includes(state.filter));
+  rows.sort((a, b) => {
+    const av = k === "age" ? ageOf(a) : a[k], bv = k === "age" ? ageOf(b) : b[k];
+    if (av == null) return 1; if (bv == null) return -1;
+    return (av < bv ? -1 : av > bv ? 1 : 0) * dir;
+  });
+  document.querySelectorAll("thead th").forEach((th) => {
+    th.innerHTML = th.textContent.replace(" ↑", "").replace(" ↓", "");
+    if (th.dataset.k === k) th.innerHTML += ' <span class="arr">' + (dir > 0 ? "↑" : "↓") + "</span>";
+  });
+  const tb = $("tbody");
+  tb.innerHTML = "";
+  for (const q of rows.slice(0, 600)) {
+    const tr = document.createElement("tr");
+    if (flash && flash.has(q.symbol)) tr.className = flash.get(q.symbol);
+    if (q.symbol === state.selected) tr.classList.add("sel");
+    const chg = q.change_percent;
+    const cls = chg == null || Math.abs(chg) < 0.005 ? "flat" : chg > 0 ? "up" : "down";
+    const arrow = cls === "up" ? "▲" : cls === "down" ? "▼" : "•";
+    const age = ageOf(q);
+    tr.innerHTML =
+      "<td></td><td></td>" +
+      '<td><span class="chip ' + cls + '">' + arrow + " <span></span></span></td>" +
+      '<td><span class="chip ' + cls + '">' + arrow + " <span></span></span></td>" +
+      "<td></td><td class='agecell'></td>";
+    tr.children[0].textContent = q.symbol;
+    tr.children[1].textContent = q.price != null ? fmt.format(q.price) : "—";
+    tr.children[2].querySelector("span span").textContent = q.change != null ? fmt.format(q.change) : "—";
+    tr.children[3].querySelector("span span").textContent = chg != null ? "%" + fmt.format(chg) : "—";
+    tr.children[4].textContent = q.volume != null ? fmtInt.format(q.volume) : "—";
+    tr.children[5].textContent = age != null ? (age < 90 ? Math.round(age) + " sn" : Math.round(age / 60) + " dk") : "—";
+    tr.children[0].onclick = () => selectSymbol(q.symbol);
+    tb.appendChild(tr);
+  }
+  if (!rows.length) tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--ink-3);padding:26px;">eslesen sembol yok</td></tr>';
+}
+
+/* ---------- sparkline ---------- */
+async function selectSymbol(sym) {
+  state.selected = sym;
+  renderTable();
+  updateSparkHead();
+  try {
+    const j = await api("/intraday/" + sym);
+    drawSpark(j.points || []);
+    $("sp-note").textContent = (j.count || 0) + " nokta · gun ici";
+  } catch (e) { $("sp-note").textContent = "intraday alinamadi"; }
+}
+function updateSparkHead() {
+  const q = state.quotes.get(state.selected);
+  $("sp-sym").textContent = state.selected || "Sembol secin";
+  $("sp-px").textContent = q && q.price != null ? fmt.format(q.price) + " ₺" : "—";
+}
+function drawSpark(points) {
+  const svg = $("sp-svg");
+  svg.innerHTML = "";
+  const vals = points.map((p) => p.p).filter((v) => v != null);
+  if (vals.length < 2) { $("sp-min").textContent = ""; $("sp-max").textContent = ""; return; }
+  const min = Math.min(...vals), max = Math.max(...vals), span = max - min || 1;
+  const W = 300, H = 88, pad = 4;
+  const pts = vals.map((v, i) => [pad + (i * (W - 2 * pad)) / (vals.length - 1), H - pad - ((v - min) / span) * (H - 2 * pad)]);
+  const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+  const area = line + " L" + pts[pts.length - 1][0].toFixed(1) + "," + (H - 1) + " L" + pts[0][0].toFixed(1) + "," + (H - 1) + " Z";
+  svg.innerHTML =
+    '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">' +
+    '<stop offset="0" stop-color="#0D9488" stop-opacity=".35"/><stop offset="1" stop-color="#0D9488" stop-opacity="0"/></linearGradient></defs>' +
+    '<path d="' + area + '" fill="url(#g)"/>' +
+    '<path d="' + line + '" fill="none" stroke="#0D9488" stroke-width="2" stroke-linejoin="round"/>' +
+    '<circle cx="' + pts[pts.length - 1][0] + '" cy="' + pts[pts.length - 1][1] + '" r="3" fill="#2DD4BF"/>';
+  $("sp-min").textContent = fmt.format(min);
+  $("sp-max").textContent = fmt.format(max);
+}
+
+/* ---------- yasam dongusu ---------- */
+let timers = [];
+function restartAll() {
+  timers.forEach(clearInterval); timers = [];
+  state.quotes.clear(); state.ticks = 0;
+  pollReady(); pollHealth(); pollValidate();
+  timers.push(setInterval(pollReady, 30000));
+  timers.push(setInterval(pollHealth, 120000));
+  timers.push(setInterval(pollValidate, 300000));
+  timers.push(setInterval(() => renderTable(), 30000)); // yas kolonu ilerlesin
+  startSSE();
+}
+restartAll();
+</script>
+</body>
+</html>
