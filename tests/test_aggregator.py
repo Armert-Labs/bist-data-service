@@ -211,3 +211,31 @@ async def test_all_providers_failing_returns_empty():
     agg = _agg([FakeProvider("yahoo", fail=True), FakeProvider("isyatirim", fail=True)])
     res = await agg.fetch_quotes(["THYAO"])
     assert res == {}  # exception yukari sizmaz, mevcut store verisi korunur
+
+
+async def test_history_skips_non_history_provider_and_keeps_quotes():
+    """supports_history=False kaynak (orn. TradingView), bos history yuzunden
+    breaker'i actirmamali; QUOTE hizmeti korunmali."""
+    from datetime import UTC, datetime
+
+    from app.models import HistoryBar
+
+    class NoHistory(FakeProvider):
+        supports_history = False
+
+    class WithBars2(FakeProvider):
+        async def fetch_history(self, symbol, period, interval):
+            return HistoryResponse(
+                symbol=symbol,
+                period=period,
+                interval=interval,
+                bars=[HistoryBar(time=datetime(2026, 1, 1, tzinfo=UTC), close=10.0)],
+            )
+
+    nh = NoHistory("tradingview", {"THYAO": Quote(symbol="THYAO", price=100.0)})
+    agg = _agg([nh, WithBars2("isyatirim")])
+    res = await agg.fetch_history("THYAO", "1mo", "1d")
+    assert len(res.bars) == 1  # bars ikinci kaynaktan geldi
+    assert agg._providers[0][1].state == "closed"  # tradingview breaker ACILMADI
+    quotes = await agg.fetch_quotes(["THYAO"])
+    assert quotes["THYAO"].price == 100.0  # quote hizmeti hala calisiyor

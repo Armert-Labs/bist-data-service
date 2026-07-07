@@ -149,6 +149,24 @@ tr.fl-up   { animation: flup .8s ease; } tr.fl-down { animation: fldown .8s ease
 .prov .pdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
 .prov.ok .pdot { background: var(--up-hi); } .prov.open .pdot { background: var(--down-hi); } .prov.half .pdot { background: var(--armert-hi); }
 .prov .pstate { margin-left: auto; color: var(--ink-3); font-size: 11.5px; letter-spacing: .06em; }
+
+/* Claude denetimi karti — dosya-tabanli, sahte animasyon yok */
+.review { padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 6px; }
+.review .rline { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+.review .rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); flex: none; }
+.review.ok .rdot { background: var(--up-hi); box-shadow: 0 0 8px rgba(52,211,153,.55); }
+.review.warn .rdot { background: var(--armert-hi); }
+.review.bad .rdot { background: var(--down-hi); }
+.review .rmeta { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+.review .rsum { font-size: 11.8px; color: var(--ink-2); line-height: 1.45; margin-top: 4px; }
+.rbadge { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; padding: 3px 9px; border-radius: 999px; text-transform: uppercase; background: rgba(148,160,180,.1); color: var(--ink-3); }
+.rbadge.ok { color: var(--up-hi); background: rgba(5,150,105,.14); }
+.rbadge.warn { color: var(--armert-hi); background: rgba(184,119,10,.14); }
+.rbadge.bad { color: var(--down-hi); background: rgba(220,38,38,.14); }
+.rstatus { font-weight: 600; }
+.rstatus.ok { color: var(--up-hi); }
+.rstatus.warn { color: var(--armert-hi); }
+.rstatus.bad { color: var(--down-hi); }
 .log { padding: 8px 0; max-height: 240px; overflow-y: auto; }
 .log .ln { display: flex; gap: 10px; padding: 4px 16px; font-family: var(--mono); font-size: 11.8px; color: var(--ink-2); }
 .log .ln .t { color: var(--ink-3); flex: none; }
@@ -232,6 +250,15 @@ a { color: var(--teal-hi); text-decoration: none; }
       <div class="px" id="sp-px">—</div>
       <svg id="sp-svg" viewBox="0 0 300 88" preserveAspectRatio="none"></svg>
       <div class="mm"><span id="sp-min"></span><span id="sp-note">tabloda bir sembole tiklayin</span><span id="sp-max"></span></div>
+    </div>
+    <div class="card">
+      <div class="chead"><h2>Claude Denetimi</h2><div class="right"><span class="rbadge" id="rv-badge">—</span></div></div>
+      <div class="review" id="review">
+        <div class="rline"><span class="rdot" id="rv-dot"></span><span id="rv-who">yukleniyor…</span></div>
+        <div class="rmeta" id="rv-when"></div>
+        <div class="rmeta" id="rv-commit">commit <span id="rv-commit-hash"></span> · durum: <span class="rstatus" id="rv-status"></span></div>
+        <div class="rsum" id="rv-summary"></div>
+      </div>
     </div>
     <div class="card">
       <div class="chead"><h2>Veri Kaynaklari</h2></div>
@@ -366,6 +393,64 @@ async function pollValidate() {
 async function pollHealth() {
   try { const j = await api("/health"); $("version").textContent = "api v" + j.version; }
   catch { /* /ready zaten alarm verir */ }
+}
+
+/* ---------- Claude denetimi (dosya-tabanli, sahte animasyon yok) ---------- */
+state.review = null;
+function relTimeTr(iso) {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "bilinmiyor";
+  const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (diffSec < 60) return "az once";
+  const min = Math.floor(diffSec / 60);
+  if (min < 60) return min + " dakika once";
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return hr + " saat once";
+  const day = Math.floor(hr / 24);
+  return day + " gun once";
+}
+function freshnessOf(iso) {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return { cls: "", label: "BILINMIYOR" };
+  const days = (Date.now() - then) / 86400000;
+  if (days <= 7) return { cls: "ok", label: "GUNCEL" };
+  if (days <= 30) return { cls: "warn", label: "ESKIDI" };
+  return { cls: "bad", label: "DENETIM GECIKTI" };
+}
+function renderReviewClock() {
+  if (!state.review) return;
+  const fr = freshnessOf(state.review.last_review);
+  $("review").className = "review " + fr.cls;
+  $("rv-badge").className = "rbadge " + fr.cls;
+  $("rv-badge").textContent = fr.label;
+  $("rv-when").textContent = "son kontrol: " + relTimeTr(state.review.last_review);
+}
+async function loadReviewStatus() {
+  try {
+    const r = await fetch("./review-status.json", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    state.review = j;
+    $("rv-who").textContent = "denetleyen: " + (j.reviewed_by || "—");
+    const statusCls = j.status === "ok" ? "ok" : j.status === "warn" ? "warn" : "bad";
+    // Degerler textContent ile yazilir (review-status.json'a HTML sizsa bile XSS olmaz).
+    $("rv-commit-hash").textContent = j.reviewed_commit || "—";
+    $("rv-status").textContent = j.status || "—";
+    $("rv-status").className = "rstatus " + statusCls;
+    $("rv-summary").textContent = j.summary || "";
+    renderReviewClock();
+  } catch (e) {
+    state.review = null;
+    $("review").className = "review";
+    $("rv-badge").className = "rbadge";
+    $("rv-badge").textContent = "—";
+    $("rv-who").textContent = "denetim durumu bilinmiyor";
+    $("rv-when").textContent = "";
+    $("rv-commit-hash").textContent = "—";
+    $("rv-status").textContent = "";
+    $("rv-status").className = "rstatus";
+    $("rv-summary").textContent = "";
+  }
 }
 
 /* ---------- SSE (fetch-stream: EventSource header gonderemez) ---------- */
@@ -518,6 +603,8 @@ function restartAll() {
   startSSE();
 }
 restartAll();
+loadReviewStatus();
+setInterval(renderReviewClock, 60000);
 </script>
 </body>
 </html>

@@ -12,6 +12,7 @@ UPDATE_DURATION = Histogram(
     buckets=(1, 5, 10, 20, 30, 45, 60, 90, 120),
 )
 UPDATE_SYMBOLS = Gauge("bist_update_symbols_last", "Son turda basariyla guncellenen sembol sayisi")
+WATCHLIST_SIZE = Gauge("bist_watchlist_size", "Takip listesindeki (dinamik evren) sembol sayisi")
 
 FETCH_REQUESTS = Counter("bist_fetch_requests_total", "Kaynak cekim istekleri", ["provider"])
 FETCH_ERRORS = Counter("bist_fetch_errors_total", "Kaynak cekim hatalari", ["provider"])

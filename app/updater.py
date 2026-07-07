@@ -31,6 +31,7 @@ class BackgroundUpdater:
         self._update_lock = asyncio.Lock()
         self._update_running = False
         self._cycle = 0
+        self._next_universe_check: float | None = None
         self.running = False
 
     @property
@@ -68,6 +69,47 @@ class BackgroundUpdater:
             "Guncelleme tamamlandi: %d/%d sembol, %.1f sn", total, len(self._symbols), duration
         )
         return total
+
+    async def _maybe_refresh_universe(self) -> None:
+        """Sembol evrenini (takip listesi) dongu basinda periyodik yeniler.
+
+        DIKKAT (concurrency): Bu metot dongu basinda, _update_once ONCESI ve
+        update_lock DISINDA cagrilir. _symbols'u TEK atama ile atomik degistirir;
+        _update_once bir sonraki adimda yeni listeyi bastan okur (yaridan degil).
+        Guard: fetch_universe bos/yetersiz donerse mevcut liste KORUNUR ve kisa
+        retry araligiyla tekrar denenir (basarisizlikta endpoint dovulmez).
+        Kayipsizlik: yeni evren; statik taban + EXTRA + mevcut listenin BIRLESIMIdir
+        (kismi bir yanit daha once kesfedilmis semboleri dusuremez).
+        """
+        if not settings.symbol_universe_refresh_enabled:
+            return
+        now = time.monotonic()
+        if self._next_universe_check is not None and now < self._next_universe_check:
+            return
+
+        try:
+            fetched = await sym.fetch_universe()
+        except Exception as exc:  # fetch_universe kendi guard'ini yapar; yine de saglam ol
+            logger.warning("Sembol evreni yenileme hatasi: %s", exc)
+            fetched = []
+
+        if len(fetched) >= settings.symbol_universe_min_count:
+            merged = sorted(set(sym.default_watchlist()) | set(self._symbols) | set(fetched))
+            self._symbols = merged  # atomik swap (tek atama)
+            self._next_universe_check = now + settings.symbol_universe_refresh_hours * 3600.0
+            metrics.WATCHLIST_SIZE.set(len(merged))
+            logger.info("Sembol evreni yenilendi: %d sembol (evren %d)", len(merged), len(fetched))
+        else:
+            # Guard: evren guvenilmez -> mevcut liste korunur; kisa retry ile tekrar dene
+            # (her turda 60 sn'de bir endpoint dovulmesini onler).
+            self._next_universe_check = now + settings.symbol_universe_retry_seconds
+            metrics.WATCHLIST_SIZE.set(len(self._symbols))
+            logger.warning(
+                "Sembol evreni yenilemesi reddedildi (%d < %d); mevcut %d sembol korunuyor",
+                len(fetched),
+                settings.symbol_universe_min_count,
+                len(self._symbols),
+            )
 
     async def _refresh_age_metric(self) -> None:
         with contextlib.suppress(Exception):
@@ -109,6 +151,8 @@ class BackgroundUpdater:
         first = True
         while not self._stop.is_set():
             try:
+                # Dongu basinda (update ONCESI, lock DISINDA): evreni atomik yenile.
+                await self._maybe_refresh_universe()
                 if first or settings.update_when_closed or is_market_open():
                     async with self._update_lock:
                         self._update_running = True
@@ -130,6 +174,9 @@ class BackgroundUpdater:
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._stop.clear()
+            # Baslangic degeri: refresh kapali/henuz calismamisken gauge 0 (yaniltici
+            # "takip listesi bos") gorunmesin.
+            metrics.WATCHLIST_SIZE.set(len(self._symbols))
             self._task = asyncio.create_task(self._loop())
             logger.info("Arka plan guncelleyici baslatildi (%d sembol).", len(self._symbols))
 

@@ -18,6 +18,7 @@ from .config import settings
 from .models import HistoryResponse, Quote
 from .providers.base import CircuitBreaker, Provider
 from .providers.isyatirim import IsYatirimProvider
+from .providers.tradingview import TradingViewProvider
 from .providers.yahoo import YahooProvider
 from .providers.yahoo_chart import YahooChartProvider
 from .symbol_circuit import symbol_circuit
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 _FACTORY = {
     "yahoo": YahooProvider,
     "yahoo_chart": YahooChartProvider,
+    "tradingview": TradingViewProvider,
     "isyatirim": IsYatirimProvider,
 }
 
@@ -220,6 +222,8 @@ class Aggregator:
 
     async def fetch_history(self, symbol: str, period: str, interval: str) -> HistoryResponse:
         for provider, breaker in self._providers:
+            if not provider.supports_history:
+                continue
             if not breaker.allow():
                 continue
             try:

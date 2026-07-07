@@ -59,6 +59,10 @@ class CircuitBreaker:
 
 class Provider(ABC):
     name: str
+    # Bu kaynak gecmis OHLCV verebilir mi? False ise aggregator.fetch_history
+    # bu saglayiciyi ATLAR (bos yanitini "hata" sayip circuit breaker'i tetikleyip
+    # ayni kaynagin QUOTE hizmetini yanlislikla devre disi birakmasin).
+    supports_history: bool = True
 
     @abstractmethod
     async def fetch_quotes(self, symbols: list[str]) -> dict[str, Quote]:

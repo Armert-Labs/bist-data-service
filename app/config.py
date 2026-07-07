@@ -79,7 +79,9 @@ class Settings:
     # Oncelik sirasi. yahoo=yfinance(batch), yahoo_chart=v8 chart(dayanikli),
     # isyatirim=Turkiye (yurtdisi IP'lerden erisilemeyebilir).
     providers: list[str] = field(
-        default_factory=lambda: _get_list("PROVIDERS", ["yahoo", "yahoo_chart", "isyatirim"])
+        default_factory=lambda: _get_list(
+            "PROVIDERS", ["yahoo", "yahoo_chart", "tradingview", "isyatirim"]
+        )
     )
     # failover: ilk veri donduren kaynak yeter (verimli).
     # gapfill: her kaynak bir oncekinin eksiklerini tamamlar (kesintisizlik, onerilen).
@@ -130,6 +132,29 @@ class Settings:
             ],
         )
     )
+    # --- Sembol evreni (takip listesi) ---
+    # Statik BIST_SYMBOLS listesine EK semboller (virgulle). Statik liste her zaman
+    # taban kalir; bu yalnizca ekler (kayipsiz). Yeni kotasyonlari elle eklemek icin.
+    extra_symbols: list[str] = field(default_factory=lambda: _get_list("EXTRA_SYMBOLS", []))
+    # Updater dongu basinda TradingView'den TUM BIST evrenini periyodik cekip
+    # takip listesini genisletir (2026+ yeni hisseler otomatik gorunur).
+    symbol_universe_refresh_enabled: bool = field(
+        default_factory=lambda: _get_bool("SYMBOL_UNIVERSE_REFRESH_ENABLED", True)
+    )
+    symbol_universe_refresh_hours: float = field(
+        default_factory=lambda: _get_float("SYMBOL_UNIVERSE_REFRESH_HOURS", 24.0)
+    )
+    # Cekilen evren bu sayidan az ise guvenilmez sayilir ve YOK SAYILIR (guard):
+    # bozuk/kismi bir enumerate mevcut listeyi daraltmasin.
+    symbol_universe_min_count: int = field(
+        default_factory=lambda: _get_int("SYMBOL_UNIVERSE_MIN_COUNT", 400)
+    )
+    # Evren cekimi basarisiz/guard-reddi olursa bir sonraki denemeye kadar bekleme
+    # (sn). Basarisizlikta her turda (60 sn) endpoint dovulmesini onler.
+    symbol_universe_retry_seconds: float = field(
+        default_factory=lambda: _get_float("SYMBOL_UNIVERSE_RETRY_SECONDS", 900.0)
+    )
+
     # /history onbellek TTL (sn)
     history_cache_ttl: float = field(default_factory=lambda: _get_float("HISTORY_CACHE_TTL", 600.0))
     # /validate icin bagimsiz referans kaynaklar (birincilden farkli olmali).

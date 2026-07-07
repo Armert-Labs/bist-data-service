@@ -10,7 +10,12 @@ guncellenen "takip listesi"dir, bir kisit degildir.
 
 from __future__ import annotations
 
+import logging
 import re
+
+import httpx
+
+logger = logging.getLogger(__name__)
 
 # Gecerli BIST sembol bicimi: 2-6 buyuk harf/rakam.
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,6}$")
@@ -576,4 +581,59 @@ def from_yahoo(yahoo_symbol: str) -> str:
 
 
 def default_watchlist() -> list[str]:
-    return list(BIST_SYMBOLS)
+    """Statik BIST_SYMBOLS + EXTRA_SYMBOLS birlesimi (sirali).
+
+    Statik liste HER ZAMAN taban kalir (kayipsizlik); EXTRA_SYMBOLS yalnizca ekler.
+    """
+    from .config import settings
+
+    extra = {normalize(s) for s in settings.extra_symbols if is_valid_symbol(s)}
+    return sorted(set(BIST_SYMBOLS) | extra)
+
+
+async def fetch_universe() -> list[str]:
+    """TradingView scanner'dan TUM BIST hisse sembollerini enumerate eder.
+
+    Govde `type=stock` filtreler; yanit satirlari s="BIST:XXX" bicimindedir.
+    XXX cikarilip is_valid_symbol'den gecirilir. Enumerate GUVENILMEZSE (ag/JSON
+    hatasi) veya sonuc symbol_universe_min_count altinda ise BOS liste doner (guard):
+    boylece bozuk/kismi bir evren, cagiran tarafta mevcut listeyi daraltamaz.
+    """
+    from .config import settings
+    from .providers.tradingview import _HEADERS, _SCANNER_URL
+
+    body = {
+        "filter": [{"left": "type", "operation": "equal", "right": "stock"}],
+        "symbols": {"query": {"types": []}},
+        "columns": ["name"],
+        "range": [0, 2000],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(_SCANNER_URL, json=body, headers=_HEADERS)
+        resp.raise_for_status()
+        rows = resp.json().get("data") or []
+    except Exception as exc:
+        logger.warning("TradingView evren cekimi hatasi: %s", exc)
+        return []
+
+    out: set[str] = set()
+    for row in rows:
+        ticker = row.get("s") if isinstance(row, dict) else None
+        # Yalnizca BIST borsasi: yanit karisirsa (NASDAQ:AAPL vb.) yabanci
+        # semboller takip listesine sizmasin.
+        if not isinstance(ticker, str) or not ticker.startswith("BIST:"):
+            continue
+        bist = normalize(ticker.split(":", 1)[1])
+        if is_valid_symbol(bist):
+            out.add(bist)
+
+    result = sorted(out)
+    if len(result) < settings.symbol_universe_min_count:
+        logger.warning(
+            "TradingView evreni yetersiz: %d < %d, guard reddetti",
+            len(result),
+            settings.symbol_universe_min_count,
+        )
+        return []
+    return result
