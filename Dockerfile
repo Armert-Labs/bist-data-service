@@ -1,16 +1,20 @@
 # --- Build asamasi: bagimliliklari ve paketi derle ---
-FROM python:3.14-slim AS builder
+# 3.13: CI test matrisiyle ayni surum (3.14 hicbir testten gecmiyordu).
+FROM python:3.13-slim AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /src
-COPY pyproject.toml README.md ./
+# Bagimlilik katmani app kodundan once: app/*.py degisikligi 56 pinli paketin
+# yeniden kurulumunu tetiklemesin.
+COPY pyproject.toml README.md requirements.lock ./
+RUN pip install --no-cache-dir --prefix=/install -r requirements.lock
 COPY app ./app
-RUN pip install --no-cache-dir --prefix=/install .
+RUN pip install --no-cache-dir --prefix=/install --no-deps .
 
 # --- Runtime asamasi: yalin, root olmayan ---
-FROM python:3.14-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
@@ -22,6 +26,9 @@ RUN apt-get update \
     && useradd --create-home --uid 10001 appuser
 
 COPY --from=builder /install /usr/local
+
+# Lock/pyproject uyumsuzlugunu (eksik/celisen bagimlilik) build aninda yakala.
+RUN pip check
 
 USER appuser
 EXPOSE 8000

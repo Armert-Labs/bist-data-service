@@ -2,6 +2,7 @@
 
 import hashlib
 
+import pytest
 from app.auth import ApiKeyRegistry, registry
 from app.main import app
 from fastapi.testclient import TestClient
@@ -56,3 +57,18 @@ def test_public_endpoints_no_key_needed(monkeypatch):
         # health/ready auth istemez (probe'lar icin)
         assert c.get("/health").status_code == 200
         assert c.get("/ready").status_code in (200, 503)
+
+
+def test_production_mode_refuses_auth_disabled(override_settings):
+    # Uretim modunda auth kapatilmis bir yapilandirmayla servis ACILMAMALI
+    # (docker-compose.override.yml / .env sizintisina karsi fail-fast).
+    override_settings(production_mode=True, auth_required=False)
+    with pytest.raises(RuntimeError, match="AUTH_REQUIRED"), TestClient(app):
+        pass
+
+
+def test_production_mode_starts_with_auth_and_keys(override_settings, monkeypatch):
+    override_settings(production_mode=True, auth_required=True)
+    monkeypatch.setattr(registry, "_entries", [("testkey", "test", False)])
+    with TestClient(app) as c:
+        assert c.get("/health").status_code == 200

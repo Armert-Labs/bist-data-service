@@ -38,7 +38,7 @@ from . import __version__, metrics
 from . import symbols as sym
 from .aggregator import aggregator
 from .auth import registry
-from .config import settings
+from .config import settings, validate_production
 from .deps import fetch_semaphore, limiter, require_api_key
 from .logging_config import set_request_id, setup_logging
 from .market import is_market_open, market_state
@@ -81,7 +81,9 @@ _all_cache: dict[tuple[str, str], tuple[float, bytes]] = {}
 async def lifespan(app: FastAPI):
     logger.info("Servis baslatiliyor (v%s), redis=%s", __version__, settings.redis_enabled)
 
-    # Kimlik dogrulama durumu uyarilari (fail-safe farkindaligi)
+    # Kimlik dogrulama guard'lari: uretimde fail-fast, aksi halde uyari logla.
+    validate_production()
+
     if settings.production_mode and not registry.enabled:
         raise RuntimeError(
             "PRODUCTION_MODE=true ancak API anahtari tanimli degil. "

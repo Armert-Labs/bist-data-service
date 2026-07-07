@@ -14,6 +14,10 @@ env/
 # Ortam degiskenleri
 .env
 
+# Compose'un otomatik yukledigi lokal override (auth kapatabilir — commit etme;
+# gelistirme icin docker-compose.dev.yml kullanin)
+docker-compose.override.yml
+
 # Operator webhook konfigurasyonu (hedef URL'ler icerebilir)
 webhooks.json
 
@@ -29,6 +33,7 @@ htmlcov/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+logs/
 
 # IDE / OS
 .vscode/

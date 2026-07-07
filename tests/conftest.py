@@ -11,6 +11,24 @@ import pytest
 from app.updater import updater
 
 
+@pytest.fixture
+def override_settings():
+    """Frozen Settings alanlarini test suresince gecici degistirir."""
+    from app.config import settings
+
+    changed: dict[str, object] = {}
+
+    def _set(**kwargs):
+        for key, value in kwargs.items():
+            if key not in changed:
+                changed[key] = getattr(settings, key)
+            object.__setattr__(settings, key, value)
+
+    yield _set
+    for key, value in changed.items():
+        object.__setattr__(settings, key, value)
+
+
 @pytest.fixture(autouse=True)
 def _disable_background(monkeypatch):
     monkeypatch.setattr(updater, "start", lambda: None)

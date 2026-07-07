@@ -57,11 +57,28 @@ def _seed_store():
     from app.store import get_store
 
     store = get_store()
+    now = datetime.now(UTC)
+    # updated_at zorunlu: yoksa seans acikken is_stale=True olur ve testler
+    # gunun saatine gore gecer/kalir (saate bagimli test tuzagi).
     store._quotes = {
-        "THYAO": Quote(symbol="THYAO", price=334.0, change=0.75, change_percent=0.22, volume=1000),
-        "GARAN": Quote(symbol="GARAN", price=133.5, change=-5.1, change_percent=-3.68, volume=2000),
+        "THYAO": Quote(
+            symbol="THYAO",
+            price=334.0,
+            change=0.75,
+            change_percent=0.22,
+            volume=1000,
+            updated_at=now,
+        ),
+        "GARAN": Quote(
+            symbol="GARAN",
+            price=133.5,
+            change=-5.1,
+            change_percent=-3.68,
+            volume=2000,
+            updated_at=now,
+        ),
     }
-    store._last_update = datetime.now(UTC)
+    store._last_update = now
 
 
 def test_all_with_data():

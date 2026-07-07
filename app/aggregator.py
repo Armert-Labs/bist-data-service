@@ -11,6 +11,7 @@ Kapsam kontrolu: kismi/bos yanit basarisiz sayilir (circuit breaker tetiklenir).
 from __future__ import annotations
 
 import logging
+import time
 
 from . import metrics
 from .config import settings
@@ -33,6 +34,9 @@ _FACTORY = {
 class Aggregator:
     def __init__(self) -> None:
         self._providers: list[tuple[Provider, CircuitBreaker]] = []
+        # Sembol -> (ilk red, son red) monotonic. Kesintisiz red penceresini izler;
+        # herhangi bir kabulde temizlenir, escape'ten uzun bosluk pencereyi sifirlar.
+        self._sanity_reject_since: dict[str, tuple[float, float]] = {}
         for name in settings.providers:
             factory = _FACTORY.get(name)
             if factory is None:
@@ -57,23 +61,75 @@ class Aggregator:
         return ratio >= (settings.provider_min_coverage_pct / 100.0)
 
     def _is_sane(self, symbol: str, quote: Quote, previous: dict[str, float] | None) -> bool:
-        if not previous:
-            return True
-        prev = previous.get(symbol)
+        prev = (previous or {}).get(symbol)
         if prev is None or prev == 0 or quote.price is None:
+            self._sanity_reject_since.pop(symbol, None)
             return True
         change_pct = abs((quote.price - prev) / prev * 100.0)
-        if change_pct > settings.sanity_max_change_percent:
-            metrics.SANITY_REJECTS.inc()
-            logger.warning(
-                "Sanity reddi %s: %%%.1f degisim (%.4f -> %.4f)",
-                symbol,
-                change_pct,
-                prev,
-                quote.price,
-            )
-            return False
-        return True
+        if change_pct <= settings.sanity_max_change_percent:
+            self._sanity_reject_since.pop(symbol, None)
+            return True
+
+        escape = settings.sanity_reject_escape_seconds
+        if escape > 0:
+            now = time.monotonic()
+            entry = self._sanity_reject_since.get(symbol)
+            # Escape'ten uzun fetch boslugu "kesintisiz red" sayilmaz: gece/kesinti
+            # sonrasi ilk bozuk tick'in aninda kacis almasini onler.
+            if entry is None or now - entry[1] > escape:
+                self._sanity_reject_since[symbol] = (now, now)
+            else:
+                self._sanity_reject_since[symbol] = (entry[0], now)
+
+        metrics.SANITY_REJECTS.inc()
+        logger.warning(
+            "Sanity reddi %s: %%%.1f degisim (%.4f -> %.4f)",
+            symbol,
+            change_pct,
+            prev,
+            quote.price,
+        )
+        return False
+
+    def _try_escape(self, symbol: str, candidates: list[Quote]) -> Quote | None:
+        """Kesintisiz red penceresi dolduysa VE en az iki kaynak yeni fiyatta
+        uzlasiyorsa ilk adayi kabul eder.
+
+        Coklu-kaynak uzlasisi sarti: bedelsiz/split'te tum kaynaklar ayni yeni
+        fiyati verir; tek bozuk kaynagin fiyati ise teyit alamaz (previous'i
+        zehirleyip dogru fiyatlari reddettirme dongusunu engeller). Damga burada
+        SILINMEZ: kabul commit'e donusurse bir sonraki turda dogal kabul temizler,
+        donusmezse (orn. cross-validate dusurdu) pencere sifirlanmadan kalir.
+        """
+        escape = settings.sanity_reject_escape_seconds
+        if escape <= 0 or len(candidates) < 2:
+            return None
+        entry = self._sanity_reject_since.get(symbol)
+        now = time.monotonic()
+        if entry is None or now - entry[0] < escape:
+            return None
+        base = candidates[0]
+        if base.price is None:
+            return None
+        max_pct = settings.cross_validate_max_pct
+        agree = sum(
+            1
+            for other in candidates[1:]
+            if other.price is not None
+            and abs(other.price - base.price) / base.price * 100.0 <= max_pct
+        )
+        if agree < 1:
+            return None
+        metrics.SANITY_ESCAPES.inc()
+        logger.warning(
+            "Sanity kacisi %s: %d kaynak yeni fiyatta uzlasti, %.0f sn kesintisiz "
+            "red sonrasi kabul ediliyor (fiyat=%.4f)",
+            symbol,
+            agree + 1,
+            now - entry[0],
+            base.price,
+        )
+        return base
 
     def get_provider(self, name: str) -> Provider | None:
         for provider, _ in self._providers:
@@ -89,6 +145,7 @@ class Aggregator:
         mode = settings.provider_mode.lower()
         gapfill = mode in ("gapfill", "hybrid")
         result: dict[str, Quote] = {}
+        rejected: dict[str, list[Quote]] = {}
         remaining = list(symbols)
         min_cov = settings.provider_min_coverage_pct / 100.0
 
@@ -141,12 +198,23 @@ class Aggregator:
                     symbol_circuit.record_failure(provider.name, s)
 
             for s, q in fetched.items():
-                if s not in result and self._is_sane(s, q, previous):
+                if s in result:
+                    continue
+                if self._is_sane(s, q, previous):
                     result[s] = q
+                else:
+                    rejected.setdefault(s, []).append(q)
             remaining = [s for s in symbols if s not in result]
 
             if not gapfill and result:
                 break
+
+        for s, candidates in rejected.items():
+            if s in result:
+                continue
+            escaped = self._try_escape(s, candidates)
+            if escaped is not None:
+                result[s] = escaped
 
         return result
 

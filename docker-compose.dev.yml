@@ -1,0 +1,21 @@
+# Gelistirme / canli test katmani — OTOMATIK YUKLENMEZ.
+# Kullanim: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# (docker-compose.override.yml adi kullanilmaz: compose onu sessizce otomatik
+# yukler ve auth'u kapatan bu ayarlar uretim VM'sine sizabilir.)
+services:
+  updater:
+    volumes:
+      - ./webhooks.json:/app/webhooks.json:ro
+    ports:
+      - "8001:8001"
+    environment:
+      - WEBHOOKS_ENABLED=true
+      - WEBHOOKS_CONFIG=/app/webhooks.json
+      - LOG_JSON=false
+
+  api:
+    environment:
+      - AUTH_REQUIRED=false
+      - DEMO_ENABLED=true
+      - METRICS_PUBLIC=true
+      - LOG_JSON=false

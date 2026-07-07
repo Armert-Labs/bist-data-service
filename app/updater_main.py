@@ -16,6 +16,7 @@ import signal
 
 from prometheus_client import start_http_server
 
+from .config import validate_production
 from .logging_config import setup_logging
 from .store import get_store
 from .updater import updater
@@ -26,6 +27,7 @@ logger = logging.getLogger("bist-updater")
 
 async def main() -> None:
     setup_logging()
+    validate_production()
 
     # Updater ayri surectir; metriklerini kendi portundan yayar (Prometheus
     # bunu ayrica scrape eder). API'nin /metrics'i yalnizca HTTP metriklerini gosterir.

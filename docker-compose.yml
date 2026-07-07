@@ -2,7 +2,10 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "60", "1", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    # volatile-ttl: bellek baskisinda yalnizca TTL'li cache anahtarlari (histcache,
+    # negative) silinir; TTL'siz kanonik veri (fiyat hash'i, intraday) asla evict
+    # edilmez. appendonly: crash'te 60 sn'lik RDB penceresi kaybolmasin.
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-ttl"]
     volumes:
       - redis-data:/data
     healthcheck:

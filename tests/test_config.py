@@ -1,6 +1,9 @@
 """Config yardimci fonksiyonlari testleri."""
 
-from app.config import _get_bool, _get_float, _get_int, _get_list
+from dataclasses import replace
+
+import pytest
+from app.config import _get_bool, _get_float, _get_int, _get_list, settings, validate_production
 
 
 def test_get_bool(monkeypatch):
@@ -33,3 +36,17 @@ def test_get_float(monkeypatch):
     assert _get_float("F", 0.0) == 3.14
     monkeypatch.setenv("F", "x")
     assert _get_float("F", 1.5) == 1.5
+
+
+def test_validate_production_rejects_auth_disabled():
+    cfg = replace(settings, production_mode=True, auth_required=False)
+    with pytest.raises(RuntimeError, match="AUTH_REQUIRED"):
+        validate_production(cfg)
+
+
+def test_validate_production_passes_with_auth_on():
+    validate_production(replace(settings, production_mode=True, auth_required=True))
+
+
+def test_validate_production_noop_outside_production():
+    validate_production(replace(settings, production_mode=False, auth_required=False))

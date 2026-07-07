@@ -130,6 +130,12 @@ class Settings:
     sanity_max_change_percent: float = field(
         default_factory=lambda: _get_float("SANITY_MAX_CHANGE_PCT", 60.0)
     )
+    # Ayni sembol bu sureden uzun kesintisiz sanity reddi yerse yeni fiyat kabul
+    # edilir. Bedelsiz/split sonrasi "eski fiyata gore hep absurt" kilitlenmesini
+    # kirar (onceki fiyat yalnizca kabul edilen quote ile guncellenir). 0 = kapali.
+    sanity_reject_escape_seconds: float = field(
+        default_factory=lambda: _get_float("SANITY_REJECT_ESCAPE_SECONDS", 900.0)
+    )
 
     # --- Bayatlik (staleness) ---
     # MARKET ACIKKEN onbellek bu sureden uzun guncellenmezse /ready fail eder ve
@@ -216,3 +222,26 @@ class Settings:
 
 
 settings = Settings()
+
+
+def validate_production(cfg: Settings | None = None) -> None:
+    """PRODUCTION_MODE acikken guvensiz yapilandirmada baslatmayi reddeder.
+
+    Hem API (main.lifespan) hem updater (updater_main) girisinde cagrilir:
+    dev override/.env sizintisi tek bayrakla iki sureci de durdurabilsin.
+    """
+    import logging
+
+    cfg = cfg or settings
+    if not cfg.production_mode:
+        return
+    if not cfg.auth_required:
+        raise RuntimeError(
+            "PRODUCTION_MODE=true ancak AUTH_REQUIRED=false. Uretimde kimlik "
+            "dogrulama kapatilamaz; dev override/.env sizintisini kontrol edin."
+        )
+    log = logging.getLogger(__name__)
+    if cfg.demo_enabled:
+        log.warning("PRODUCTION_MODE altinda DEMO_ENABLED=true — /demo herkese acik.")
+    if cfg.metrics_public:
+        log.warning("PRODUCTION_MODE altinda METRICS_PUBLIC=true — /metrics auth'suz.")

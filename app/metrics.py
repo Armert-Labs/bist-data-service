@@ -18,6 +18,9 @@ FETCH_ERRORS = Counter("bist_fetch_errors_total", "Kaynak cekim hatalari", ["pro
 PROVIDER_UP = Gauge("bist_provider_up", "Kaynak saglikli mi (1/0)", ["provider"])
 
 SANITY_REJECTS = Counter("bist_sanity_rejects_total", "Sanity-check ile elenen absurt fiyatlar")
+SANITY_ESCAPES = Counter(
+    "bist_sanity_escapes_total", "Kacis penceresi sonrasi kabul edilen sanity redleri"
+)
 WRITE_VALIDATE_REJECTS = Counter(
     "bist_write_validate_rejects_total", "Capraz-kaynak yazma dogrulamasinda elenen fiyatlar"
 )
