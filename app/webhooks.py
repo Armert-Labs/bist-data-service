@@ -36,6 +36,9 @@ from .store import Store
 
 logger = logging.getLogger(__name__)
 
+# Pub/sub kopmasinda yeniden abone olmadan once beklenecek sure (sn).
+_RECONNECT_DELAY = 5.0
+
 _VALID_CONDITIONS = {"above", "below", "pct_up", "pct_down"}
 
 
@@ -177,11 +180,21 @@ class WebhookManager:
         logger.info("Webhook izleyici baslatildi (%d kural).", len(self.rules))
         try:
             async with httpx.AsyncClient() as client:
-                async for quotes in store.subscribe():
+                while True:
                     try:
-                        await self.evaluate(quotes, client)
+                        async for quotes in store.subscribe():
+                            try:
+                                await self.evaluate(quotes, client)
+                            except Exception:
+                                logger.exception("Webhook degerlendirme hatasi")
                     except Exception:
-                        logger.exception("Webhook degerlendirme hatasi")
+                        logger.exception(
+                            "Webhook pub/sub akisi koptu; %.0f sn sonra yeniden abone olunacak",
+                            _RECONNECT_DELAY,
+                        )
+                    # Akis normal bitse de (store kapanmasi) ayni bekleyisle tekrar
+                    # abone ol: izleyici yalnizca cancel ile olur.
+                    await asyncio.sleep(_RECONNECT_DELAY)
         finally:
             # Client kapanmadan once ucuslardaki teslimatlari tamamla.
             await self.drain()

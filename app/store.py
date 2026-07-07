@@ -96,12 +96,36 @@ class Store(ABC):
                 ages.append((now - q.updated_at).total_seconds())
         return max(ages) if ages else None
 
-    async def is_stale(self) -> bool:
-        """Veri bayat mi? Sembol bazli en eski guncelleme yasina bakar."""
-        from .market import seconds_since_open
+    async def fresh_ratio(self) -> float | None:
+        """Taze (yasi staleness esiginin altinda) sembol orani; veri yoksa None.
 
+        updated_at'i olmayan quote taze SAYILMAZ (muhafazakar)."""
         data = await self.get_all()
         if not data:
+            return None
+        now = _now()
+        fresh = 0
+        oldest: float | None = None
+        for q in data.values():
+            if q.updated_at is None:
+                continue
+            age = (now - q.updated_at).total_seconds()
+            if oldest is None or age > oldest:
+                oldest = age
+            if age <= settings.staleness_seconds:
+                fresh += 1
+        if oldest is not None:
+            metrics.OLDEST_QUOTE_AGE.set(oldest)
+        return fresh / len(data)
+
+    async def is_stale(self) -> bool:
+        """Veri bayat mi? Taze sembol KAPSAMASINA bakar (en-eski-sembol degil):
+        tek guncellenemeyen sembol (askidaki hisse, watchlist-disi tek sorgu)
+        tum servisi kalici bayat gosteremez."""
+        from .market import seconds_since_open
+
+        ratio = await self.fresh_ratio()
+        if ratio is None:
             return True
 
         since_open = seconds_since_open()
@@ -110,11 +134,7 @@ class Store(ABC):
         if since_open <= settings.staleness_seconds:
             return False
 
-        age = await self.oldest_update_age()
-        if age is None:
-            return True
-        metrics.OLDEST_QUOTE_AGE.set(age)
-        return age > settings.staleness_seconds
+        return ratio < settings.staleness_min_fresh_pct / 100.0
 
     async def staleness_seconds(self) -> float | None:
         return await self.oldest_update_age()

@@ -41,6 +41,31 @@ def _get_str(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+# BIST tam gun kapali resmi tatiller. 2026 dini bayramlar ilan edilmis takvime
+# gore; 2027 icin yalnizca sabit ulusal gunler (dini bayramlari ilan edilince
+# MARKET_HOLIDAYS env ile tam liste verin).
+_DEFAULT_MARKET_HOLIDAYS = [
+    "2026-01-01",
+    "2026-03-20",  # Ramazan Bayrami 1. gun
+    "2026-04-23",
+    "2026-05-01",
+    "2026-05-19",
+    "2026-05-27",  # Kurban Bayrami 1-3. gun
+    "2026-05-28",
+    "2026-05-29",
+    "2026-07-15",
+    "2026-08-30",
+    "2026-10-29",
+    "2027-01-01",
+    "2027-04-23",
+    "2027-05-01",
+    "2027-05-19",
+    "2027-07-15",
+    "2027-08-30",
+    "2027-10-29",
+]
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- Guncelleme / cekim ---
@@ -107,10 +132,6 @@ class Settings:
     )
     # /history onbellek TTL (sn)
     history_cache_ttl: float = field(default_factory=lambda: _get_float("HISTORY_CACHE_TTL", 600.0))
-    # Updater: onceki tur bitmeden yeni tur baslatma
-    updater_skip_overlap: bool = field(
-        default_factory=lambda: _get_bool("UPDATER_SKIP_OVERLAP", True)
-    )
     # /validate icin bagimsiz referans kaynaklar (birincilden farkli olmali).
     # Erisilemeyen kaynaklar raporda "erisilemedi" olarak isaretlenir.
     validate_providers: list[str] = field(
@@ -141,6 +162,17 @@ class Settings:
     # MARKET ACIKKEN onbellek bu sureden uzun guncellenmezse /ready fail eder ve
     # is_stale=true olur. Market kapaliyken veri degisemeyecegi icin bayatlamaz.
     staleness_seconds: float = field(default_factory=lambda: _get_float("STALENESS_SECONDS", 300.0))
+    # Taze sembol orani bu yuzdenin altina duserse bayat sayilir. En-eski-sembol
+    # yerine kapsama bakilir: tek guncellenemeyen sembol (askidaki hisse,
+    # watchlist-disi tek sorgu) tum servisi kalici NOT READY yapamasin.
+    staleness_min_fresh_pct: float = field(
+        default_factory=lambda: _get_float("STALENESS_MIN_FRESH_PCT", 90.0)
+    )
+    # Bir guncelleme turunun toplam zaman butcesi (sn). Provider timeout
+    # zincirinin turu staleness esiginin uzerine tasimasini engeller. 0 = kapali.
+    updater_cycle_timeout: float = field(
+        default_factory=lambda: _get_float("UPDATER_CYCLE_TIMEOUT", 240.0)
+    )
 
     # Bulunamayan (kaynaklarda olmayan) semboller icin negatif onbellek TTL'i (sn).
     # Ayni gecersiz sembole tekrarli isteklerin upstream'i dovmesini onler.
@@ -204,8 +236,16 @@ class Settings:
     log_json: bool = field(default_factory=lambda: _get_bool("LOG_JSON", True))
 
     # --- BIST piyasa saatleri (Europe/Istanbul, kalici UTC+3) ---
-    # Resmi tatiller: virgulle ayrilmis ISO tarihler, orn. "2026-10-29,2027-01-01"
-    market_holidays: list[str] = field(default_factory=lambda: _get_list("MARKET_HOLIDAYS", []))
+    # Resmi tatiller: virgulle ayrilmis ISO tarihler. Env verilirse LISTEYI TAMAMEN
+    # degistirir (varsayilana eklenmez); "none" varsayilanlari da temizler.
+    # Yarim gun (arife) seanslari modellenmez.
+    market_holidays: list[str] = field(
+        default_factory=lambda: (
+            []
+            if os.environ.get("MARKET_HOLIDAYS", "").strip().lower() == "none"
+            else _get_list("MARKET_HOLIDAYS", _DEFAULT_MARKET_HOLIDAYS)
+        )
+    )
     market_tz_offset_hours: int = 3
     market_open_hour: int = 10
     market_open_minute: int = 0

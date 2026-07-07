@@ -56,6 +56,14 @@ async def main() -> None:
     finally:
         logger.info("Updater servisi kapatiliyor...")
         webhook_task.cancel()
+        # Cancel'i bekle: watch()'in finally'sindeki drain() ucustaki teslimatlari
+        # tamamlasin. Gercek exception'lar loglanir ama stop/close'u engellemez.
+        try:
+            await webhook_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Webhook izleyici hatayla sonlanmisti")
         await updater.stop()
         await store.close()
 

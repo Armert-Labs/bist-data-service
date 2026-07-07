@@ -102,6 +102,9 @@ def fetch_quotes(symbols: list[str]) -> dict[str, Quote]:
             actions=False,
             threads=True,
             progress=False,
+            # HTTP timeout: to_thread'deki takili istekler thread havuzunu
+            # doldurmasin (cycle butcesi coroutine'i iptal eder ama thread'i edemez).
+            timeout=30,
         )
     except Exception as exc:
         logger.warning("yf.download hatasi (%d sembol): %s", len(yahoo_syms), exc)

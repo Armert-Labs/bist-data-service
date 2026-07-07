@@ -117,3 +117,45 @@ async def test_evaluate_does_not_block_on_slow_delivery():
         for task in list(mgr._tasks):
             task.cancel()
         await asyncio.gather(*list(mgr._tasks), return_exceptions=True)
+
+
+async def test_watch_reconnects_after_subscribe_failure(monkeypatch, override_settings):
+    """Pub/sub kopmasi watch()'i oldurmemeli; yeniden abone olunmali."""
+    import asyncio
+    import contextlib
+
+    import app.webhooks as wh
+    from app.models import Quote
+
+    override_settings(webhooks_enabled=True)
+    manager = wh.WebhookManager()
+    manager.rules = [object()]  # truthiness yeterli; evaluate zaten sahte
+
+    seen = asyncio.Event()
+
+    async def fake_eval(quotes, client):
+        seen.set()
+
+    monkeypatch.setattr(manager, "evaluate", fake_eval)
+
+    calls = {"n": 0}
+
+    class FlakyStore:
+        async def subscribe(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionError("redis koptu")
+            yield [Quote(symbol="THYAO", price=1.0)]
+            await asyncio.Event().wait()  # akisi acik tut
+
+    async def fast_sleep(_):
+        return None
+
+    monkeypatch.setattr(wh.asyncio, "sleep", fast_sleep)
+
+    task = asyncio.create_task(manager.watch(FlakyStore()))
+    await asyncio.wait_for(seen.wait(), timeout=2)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert calls["n"] == 2

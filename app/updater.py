@@ -76,25 +76,45 @@ class BackgroundUpdater:
                 metrics.LAST_UPDATE_AGE.set(age)
                 metrics.OLDEST_QUOTE_AGE.set(age)
 
+    async def _cycle_work(self) -> None:
+        await self._update_once()
+        self._cycle += 1
+        if (
+            settings.drift_monitor_enabled
+            and self._cycle % settings.drift_monitor_every_n_cycles == 0
+        ):
+            await run_drift_monitor(self._store)
+
+    async def _run_cycle(self) -> bool:
+        """Bir tam turu (guncelleme + drift monitoru) zaman butcesiyle calistirir.
+
+        Provider timeout zincirleri (orn. yfinance ici takilma) turu suresiz
+        uzatamaz; butce asiminda kalan is iptal edilir, o ana kadarki batch'ler
+        zaten commit edilmistir. Donus: tur tamamlandi mi (timeout'ta False —
+        warm-up turu tamamlanana kadar tekrarlanabilsin).
+        """
+        timeout = settings.updater_cycle_timeout
+        try:
+            await asyncio.wait_for(self._cycle_work(), timeout if timeout > 0 else None)
+        except TimeoutError:
+            metrics.UPDATE_CYCLE_TIMEOUTS.inc()
+            logger.error(
+                "Guncelleme turu %.0f sn zaman butcesini asti; kalan is iptal edildi.", timeout
+            )
+            return False
+        return True
+
     async def _loop(self) -> None:
         self.running = True
         first = True
         while not self._stop.is_set():
             try:
-                if settings.updater_skip_overlap and self._update_running:
-                    logger.warning("Onceki guncelleme turu devam ediyor; yeni tur atlandi.")
-                elif first or settings.update_when_closed or is_market_open():
+                if first or settings.update_when_closed or is_market_open():
                     async with self._update_lock:
                         self._update_running = True
                         try:
-                            await self._update_once()
-                            first = False
-                            self._cycle += 1
-                            if (
-                                settings.drift_monitor_enabled
-                                and self._cycle % settings.drift_monitor_every_n_cycles == 0
-                            ):
-                                await run_drift_monitor(self._store)
+                            if await self._run_cycle():
+                                first = False
                         finally:
                             self._update_running = False
                 else:

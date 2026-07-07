@@ -217,3 +217,51 @@ def test_validate_endpoint(monkeypatch):
         body = c.get("/validate", params={"symbols": "THYAO,GARAN"}).json()
         assert body["consistent"] is True
         assert body["max_deviation_pct"] == 0.0
+
+
+def test_all_market_state_reflects_current(monkeypatch):
+    """Kapali seansta cache'teki eski OPEN damgasi istemciye sizmamali."""
+    _seed_store()
+    monkeypatch.setattr("app.main.market_state", lambda: "CLOSED")
+    with TestClient(app) as c:
+        body = c.get("/all").json()
+        assert body["market"] == "CLOSED"
+        assert all(q["market_state"] == "CLOSED" for q in body["quotes"])
+
+
+def test_quotes_market_state_reflects_current(monkeypatch):
+    _seed_store()
+    monkeypatch.setattr("app.main.market_state", lambda: "CLOSED")
+    with TestClient(app) as c:
+        body = c.get("/quotes", params={"symbols": "THYAO"}).json()
+        assert body["quotes"]["THYAO"]["market_state"] == "CLOSED"
+
+
+def test_all_cache_respects_market_flip(monkeypatch):
+    """Micro-cache isabeti kapanis anindaki state gecisini gizlememeli."""
+    _seed_store()
+    with TestClient(app) as c:
+        monkeypatch.setattr("app.main.market_state", lambda: "OPEN")
+        assert c.get("/all").json()["market"] == "OPEN"
+        monkeypatch.setattr("app.main.market_state", lambda: "CLOSED")
+        assert c.get("/all").json()["market"] == "CLOSED"
+
+
+def test_sse_payload_applies_live_state():
+    from app.main import _sse_quotes_payload
+    from app.models import Quote
+
+    q = Quote(symbol="THYAO", price=1.0, market_state="OPEN")
+    out = _sse_quotes_payload([q], None, "CLOSED")
+    assert out["THYAO"]["market_state"] == "CLOSED"
+    out = _sse_quotes_payload([q], frozenset({"GARAN"}), "CLOSED")
+    assert out == {}
+
+
+def test_ready_reports_freshness_fields():
+    _seed_store()
+    with TestClient(app) as c:
+        body = c.get("/ready").json()
+        assert body["fresh_pct"] == 100.0
+        assert body["last_update_age_seconds"] is not None
+        assert body["last_update_age_seconds"] < 5

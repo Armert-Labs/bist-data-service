@@ -74,7 +74,24 @@ VALID_SORTS = {"symbol", "price", "change", "change_percent", "volume"}
 _sse_clients = 0
 # /all micro-cache: (sort, order) -> (monotonic_ts, serialize edilmis JSON bytes).
 # Bytes saklanir ki cache isabetinde 507 quote yeniden serialize edilmesin.
-_all_cache: dict[tuple[str, str], tuple[float, bytes]] = {}
+_all_cache: dict[tuple[str, str, str], tuple[float, bytes]] = {}
+
+
+def _with_live_state(q: Quote, state: str) -> Quote:
+    """market_state'i ANLIK duruma cevirir: kapanistan sonra cache'teki eski
+    OPEN damgasi istemciye sizmasin. Store objesi mutasyona ugratilmaz
+    (MemoryStore ayni nesneyi paylasir)."""
+    return q if q.market_state == state else q.model_copy(update={"market_state": state})
+
+
+def _sse_quotes_payload(
+    quotes: list[Quote], symbol_filter: frozenset[str] | None, state: str
+) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for q in quotes:
+        if symbol_filter is None or q.symbol in symbol_filter:
+            out[q.symbol] = _with_live_state(q, state).model_dump(mode="json")
+    return out
 
 
 @asynccontextmanager
@@ -112,6 +129,15 @@ async def lifespan(app: FastAPI):
         logger.info("Servis kapatiliyor...")
         for task in background_tasks:
             task.cancel()
+        # Cancel'i bekle: webhook drain'i tamamlansin, task'in onceki bir
+        # exception'i varsa burada gorunur olsun.
+        for task in background_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Arka plan gorevi hatayla sonlanmisti")
         if not settings.redis_enabled:
             await updater.stop()
         await store.close()
@@ -264,11 +290,15 @@ async def health() -> dict:
 @limiter.exempt
 async def ready() -> dict:
     """Readiness: store erisilebilir ve veri taze mi. (Trafik almaya hazir mi.)"""
+    from datetime import UTC, datetime
+
     store_ok = await store.ping()
     size = await store.size() if store_ok else 0
     stale = await store.is_stale()
-    age = await store.staleness_seconds()
-    oldest_age = age
+    oldest_age = await store.staleness_seconds()
+    fresh = await store.fresh_ratio()
+    last_update = await store.last_update()
+    last_age = (datetime.now(UTC) - last_update).total_seconds() if last_update else None
     ready_flag = store_ok and size > 0 and not stale
 
     body = {
@@ -276,7 +306,8 @@ async def ready() -> dict:
         "store_ok": store_ok,
         "quotes_cached": size,
         "is_stale": stale,
-        "last_update_age_seconds": round(age, 1) if age is not None else None,
+        "fresh_pct": round(fresh * 100.0, 1) if fresh is not None else None,
+        "last_update_age_seconds": round(last_age, 1) if last_age is not None else None,
         "oldest_quote_age_seconds": round(oldest_age, 1) if oldest_age is not None else None,
         "market_open": is_market_open(),
         "providers": aggregator.provider_states,
@@ -317,7 +348,10 @@ async def all_quotes(
     # Kisa-TTL bytes-cache: isabette hicbir serializasyon yapilmaz (Response
     # dogrudan hazir JSON bytes doner). 507 quote'un her istekte yeniden
     # dump edilmesi yuksek trafikte ana CPU maliyetiydi.
-    cache_key = (sort, order)
+    # Anahtar market state icerir: kapanis aninda cache isabeti eski OPEN
+    # damgasini TTL boyunca servis etmesin.
+    state = market_state()
+    cache_key = (sort, order, state)
     now = time.monotonic()
     hit = _all_cache.get(cache_key)
     if hit is not None and (now - hit[0]) < settings.all_cache_ttl:
@@ -337,12 +371,12 @@ async def all_quotes(
 
     last_update = await store.last_update()
     payload = {
-        "market": market_state(),
+        "market": state,
         "count": len(quotes),
         "last_update": last_update.isoformat() if last_update else None,
         "is_stale": await store.is_stale(),
         "delayed": True,
-        "quotes": [q.model_dump(mode="json") for q in quotes],
+        "quotes": [_with_live_state(q, state).model_dump(mode="json") for q in quotes],
     }
     body = json.dumps(payload, default=str).encode("utf-8")
     _all_cache[cache_key] = (now, body)
@@ -362,7 +396,7 @@ async def get_quote(symbol: str) -> Quote:
     quote = await _get_or_fetch(sym.normalize(symbol))
     if quote is None:
         raise HTTPException(status_code=404, detail=f"Veri bulunamadi: {sym.normalize(symbol)}")
-    return quote
+    return _with_live_state(quote, market_state())
 
 
 @app.get(
@@ -378,10 +412,13 @@ async def get_quotes(
 
     if not requested:
         data = await store.get_all()
+        state = market_state()
         return {
             "count": len(data),
-            "market": market_state(),
-            "quotes": {s: q.model_dump(mode="json") for s, q in data.items()},
+            "market": state,
+            "quotes": {
+                s: _with_live_state(q, state).model_dump(mode="json") for s, q in data.items()
+            },
         }
 
     result = await store.get_quotes(requested)
@@ -395,10 +432,13 @@ async def get_quotes(
             if s not in result:
                 await store.negative_cache_add(s)
 
+    state = market_state()
     return {
         "count": len(result),
-        "market": market_state(),
-        "quotes": {s: q.model_dump(mode="json") for s, q in result.items()},
+        "market": state,
+        "quotes": {
+            s: _with_live_state(q, state).model_dump(mode="json") for s, q in result.items()
+        },
     }
 
 
@@ -570,36 +610,29 @@ async def stream(
     requested = set(_parse_symbols(symbols))
     symbol_filter = frozenset(requested) if requested else None
 
-    def _filter(quotes: list[Quote]) -> dict[str, dict]:
-        out: dict[str, dict] = {}
-        for q in quotes:
-            if symbol_filter is None or q.symbol in symbol_filter:
-                out[q.symbol] = q.model_dump(mode="json")
-        return out
-
     async def event_generator():
         global _sse_clients
         _sse_clients += 1
         metrics.SSE_CLIENTS.set(_sse_clients)
         try:
+            state = market_state()
             initial = await store.get_all()
-            snapshot = _filter(list(initial.values()))
+            snapshot = _sse_quotes_payload(list(initial.values()), symbol_filter, state)
             if snapshot:
                 yield {
                     "event": "quotes",
-                    "data": json.dumps({"market": market_state(), "quotes": snapshot}, default=str),
+                    "data": json.dumps({"market": state, "quotes": snapshot}, default=str),
                 }
 
             async for quotes in store.subscribe(symbol_filter):
                 if await request.is_disconnected():
                     break
-                payload = _filter(quotes)
+                state = market_state()
+                payload = _sse_quotes_payload(quotes, symbol_filter, state)
                 if payload:
                     yield {
                         "event": "quotes",
-                        "data": json.dumps(
-                            {"market": market_state(), "quotes": payload}, default=str
-                        ),
+                        "data": json.dumps({"market": state, "quotes": payload}, default=str),
                     }
         finally:
             _sse_clients -= 1

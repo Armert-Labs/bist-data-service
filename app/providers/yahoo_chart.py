@@ -84,6 +84,9 @@ class YahooChartProvider(Provider):
             source="yahoo_chart",
             delayed=True,
             updated_at=datetime.now(UTC),
+            exchange_time=datetime.fromtimestamp(meta["regularMarketTime"], tz=UTC)
+            if meta.get("regularMarketTime")
+            else None,
         )
 
     async def fetch_quotes(self, symbols: list[str]) -> dict[str, Quote]:

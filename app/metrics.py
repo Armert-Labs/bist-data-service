@@ -28,6 +28,9 @@ FETCH_PARTIAL = Counter(
     "bist_fetch_partial_total", "Kapsam esiginin altinda kalan provider yanitlari", ["provider"]
 )
 DRIFT_ALERTS = Counter("bist_drift_alerts_total", "Drift monitörü esik asimi uyarilari")
+UPDATE_CYCLE_TIMEOUTS = Counter(
+    "bist_update_cycle_timeouts_total", "Zaman butcesini asip iptal edilen guncelleme turlari"
+)
 OLDEST_QUOTE_AGE = Gauge("bist_oldest_quote_age_seconds", "En eski sembol guncelleme yasi (sn)")
 
 SSE_CLIENTS = Gauge("bist_sse_clients", "Aktif SSE baglanti sayisi")

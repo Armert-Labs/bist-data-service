@@ -47,6 +47,9 @@ class Quote(BaseModel):
     source: str = Field("yahoo", description="Veri kaynagi")
     delayed: bool = Field(True, description="Veri gecikmeli mi (BIST icin evet)")
     updated_at: datetime | None = Field(None, description="Onbellege alinma zamani (UTC)")
+    exchange_time: datetime | None = Field(
+        None, description="Borsadaki gercek islem zamani (kaynak sagliyorsa; UTC)"
+    )
 
 
 class HistoryBar(BaseModel):

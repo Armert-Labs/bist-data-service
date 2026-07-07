@@ -7,6 +7,9 @@ from app.providers.yahoo_chart import YahooChartProvider
 _CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/THYAO.IS"
 
 
+_MARKET_TIME_EPOCH = 1751884200
+
+
 def _chart_payload(price, prev):
     return {
         "chart": {
@@ -18,6 +21,7 @@ def _chart_payload(price, prev):
                         "regularMarketDayHigh": price + 2,
                         "regularMarketDayLow": price - 2,
                         "regularMarketVolume": 12345,
+                        "regularMarketTime": _MARKET_TIME_EPOCH,
                         "currency": "TRY",
                     }
                 }
@@ -39,6 +43,10 @@ async def test_fetch_quotes_parses_meta():
     assert q.change_percent == 1.21
     assert q.volume == 12345
     assert q.source == "yahoo_chart"
+    # Gercek borsa islem zamani tasinmali (istemci veri yasini olcebilsin)
+    assert q.exchange_time is not None
+    assert int(q.exchange_time.timestamp()) == _MARKET_TIME_EPOCH
+    assert q.exchange_time.tzinfo is not None
 
 
 @respx.mock

@@ -52,6 +52,39 @@ async def test_stale_market_open_old_data_is_stale(monkeypatch):
     assert await store.is_stale() is True
 
 
+async def test_stale_single_old_symbol_does_not_poison(monkeypatch, override_settings):
+    """Tek guncellenemeyen sembol (askidaki hisse) tum servisi bayat gostermemeli."""
+    from datetime import UTC, datetime, timedelta
+
+    override_settings(staleness_min_fresh_pct=90.0)
+    store = MemoryStore()
+    await store.connect()
+    now = datetime.now(UTC)
+    quotes = {f"S{i:02d}": Quote(symbol=f"S{i:02d}", price=1.0, updated_at=now) for i in range(19)}
+    quotes["HALTED"] = Quote(symbol="HALTED", price=1.0, updated_at=now - timedelta(hours=6))
+    await store.set_quotes(quotes)
+
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 3600.0)
+    assert await store.is_stale() is False
+
+
+async def test_stale_when_fresh_coverage_below_threshold(monkeypatch, override_settings):
+    from datetime import UTC, datetime, timedelta
+
+    override_settings(staleness_min_fresh_pct=90.0)
+    store = MemoryStore()
+    await store.connect()
+    now = datetime.now(UTC)
+    old = now - timedelta(hours=6)
+    quotes = {f"S{i:02d}": Quote(symbol=f"S{i:02d}", price=1.0, updated_at=old) for i in range(8)}
+    quotes["FRESH1"] = Quote(symbol="FRESH1", price=1.0, updated_at=now)
+    quotes["FRESH2"] = Quote(symbol="FRESH2", price=1.0, updated_at=now)
+    await store.set_quotes(quotes)
+
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 3600.0)
+    assert await store.is_stale() is True
+
+
 async def test_stale_grace_period_after_open(monkeypatch):
     """Acilistan hemen sonra onceki seans verisi bayat sayilmaz (tolerans)."""
     from datetime import UTC, datetime, timedelta

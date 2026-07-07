@@ -47,3 +47,11 @@ def test_seconds_since_open():
     assert seconds_since_open(_dt(2026, 7, 6, 12, 0)) == 7200.0
     # Market kapali (Pazar) -> None.
     assert seconds_since_open(_dt(2026, 7, 5, 12, 0)) is None
+
+
+def test_default_holidays_close_market():
+    # Varsayilan tatil listesi (config): Ramazan Bayrami 1. gun, Kurban 2. gun,
+    # Cumhuriyet Bayrami 2026 — ucunde de piyasa kapali olmali.
+    assert is_market_open(_dt(2026, 3, 20, 12, 0)) is False
+    assert is_market_open(_dt(2026, 5, 28, 12, 0)) is False
+    assert is_market_open(_dt(2026, 10, 29, 12, 0)) is False

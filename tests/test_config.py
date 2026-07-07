@@ -50,3 +50,12 @@ def test_validate_production_passes_with_auth_on():
 
 def test_validate_production_noop_outside_production():
     validate_production(replace(settings, production_mode=False, auth_required=False))
+
+
+def test_market_holidays_none_sentinel_clears_defaults(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv("MARKET_HOLIDAYS", "none")
+    assert Settings().market_holidays == []
+    monkeypatch.delenv("MARKET_HOLIDAYS")
+    assert "2026-10-29" in Settings().market_holidays

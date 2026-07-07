@@ -1,5 +1,7 @@
 """BackgroundUpdater._update_once testleri (mock aggregator + in-memory store)."""
 
+import asyncio
+
 import app.updater as updater_mod
 from app.models import Quote
 from app.store import MemoryStore
@@ -49,3 +51,36 @@ async def test_update_once_passes_previous_for_sanity(monkeypatch):
     up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
     await up._update_once()
     assert seen_previous.get("THYAO") == 100.0
+
+
+async def test_run_cycle_times_out_and_recovers(monkeypatch, override_settings):
+    """Takilan _update_once tur butcesinde iptal edilmeli; hata yukari sizmamali."""
+    override_settings(updater_cycle_timeout=0.05)
+    store = MemoryStore()
+    await store.connect()
+    up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
+
+    async def hang():
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(up, "_update_once", hang)
+    ok = await asyncio.wait_for(up._run_cycle(), timeout=1)
+    assert ok is False  # timeout'lu tur 'tamamlandi' sayilmamali (warm-up tekrari)
+
+
+async def test_run_cycle_runs_update(monkeypatch, override_settings):
+    override_settings(updater_cycle_timeout=5.0)
+    store = MemoryStore()
+    await store.connect()
+    up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
+
+    called = []
+
+    async def fake_update():
+        called.append(1)
+        return 1
+
+    monkeypatch.setattr(up, "_update_once", fake_update)
+    ok = await up._run_cycle()
+    assert ok is True
+    assert called == [1]
