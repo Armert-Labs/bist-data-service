@@ -84,6 +84,32 @@ async def test_partial_response_triggers_fallback():
     assert backup.calls == 1
 
 
+async def test_gapfill_partial_coverage_keeps_breaker_healthy():
+    # Gapfill'de fallback yalnizca onceki kaynaklarin bulamadigi (zor/illikit)
+    # sembolleri sorar; her batch FARKLI leftover verir -> dusuk kapsama provider
+    # sagligini DEGIL sembol yoklugunu gosterir. Circuit acilmamali (yoksa cok
+    # kaynak birbirini bosuna devre disi birakip kapsamayi dusurur).
+    prov = FakeProvider("isyatirim", {})  # illikitleri bulamaz, bos doner
+    agg = _agg([prov])
+    _, breaker = agg._providers[0]
+    for i in range(10):  # her tur farkli sembol -> symbol_circuit degil provider breaker
+        await agg.fetch_quotes([f"DEADA{i}"])
+    assert breaker.healthy
+    assert breaker.allow()
+
+
+async def test_failover_partial_coverage_still_trips_breaker(override_settings):
+    # Failover'da provider TUM sembolleri sorar; dusuk kapsama gercek saglik
+    # sinyalidir -> circuit acilmaya devam etmeli (regresyon guard).
+    override_settings(provider_mode="failover")
+    prov = FakeProvider("yahoo", {})  # hep bos doner
+    agg = _agg([prov])
+    _, breaker = agg._providers[0]
+    for i in range(6):
+        await agg.fetch_quotes([f"DEADB{i}"])
+    assert not breaker.healthy
+
+
 async def test_sanity_rejects_absurd_jump():
     agg = _agg([FakeProvider("yahoo", {"THYAO": Quote(symbol="THYAO", price=999.0)})])
     res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})

@@ -178,6 +178,15 @@ class Aggregator:
             if self._coverage_ok(fetched, ask):
                 breaker.record_success()
                 metrics.PROVIDER_UP.labels(provider=provider.name).set(1)
+            elif gapfill:
+                # Gapfill'de fallback yalnizca onceki kaynaklarin bulamadigi (zor /
+                # illikit) sembolleri sorar; dusuk kapsama provider sagligini DEGIL
+                # sembol yoklugunu gosterir. Yanit geldi (exception yok) -> saglikli
+                # say, circuit'i actirma. Gercek coku exception yolunda yakalanir.
+                # Aksi halde illikit semboller fallback'leri bosuna devre disi birakip
+                # legitim eksik sembollerin kapsamasini dusururdu.
+                breaker.record_success()
+                metrics.PROVIDER_UP.labels(provider=provider.name).set(1)
             else:
                 hit = sum(1 for s in ask if s in fetched)
                 ratio = hit / len(ask) if ask else 0.0
