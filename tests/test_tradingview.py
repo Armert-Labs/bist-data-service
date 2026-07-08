@@ -31,6 +31,17 @@ def _scan_payload(*rows):
     return {"totalCount": len(rows), "data": list(rows)}
 
 
+def test_parse_quote_falls_back_to_close_when_lp_null():
+    # Piyasa kapali: lp/ch/chp/prev null, ama close/open/high/low/volume dolu.
+    # Gercek yanit ornegi: {"s":"BIST:THYAO","d":[null,null,null,60645389,346,355.5,345.25,null,347.0]}
+    row = {"s": "BIST:THYAO", "d": [None, None, None, 60645389, 346, 355.5, 345.25, None, 347.0]}
+    q = parse_quote(row)
+    assert q is not None
+    assert q.price == 347.0  # close'a dustu
+    assert q.volume == 60645389
+    assert q.day_high == 355.5
+
+
 def test_parse_quote_zero_volume_preserved():
     # Hacim 0 (islem gormemis) 'bilinmiyor' (None) ile karistirilmamali.
     row = {"s": "BIST:ZERO", "d": [10.0, 0.0, 0.0, 0, 10.0, 10.0, 10.0, 10.0]}

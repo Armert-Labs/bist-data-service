@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 
 _SCANNER_URL = "https://scanner.tradingview.com/turkey/scan"
 # Kolon sirasi yanit `d[]` dizisiyle birebir eslesir (index -> alan).
-_COLUMNS = ["lp", "ch", "chp", "volume", "open", "high", "low", "prev_close_price"]
+# lp=last price (canli, piyasa kapaliyken null); close=son kapanis (fallback).
+_COLUMNS = ["lp", "ch", "chp", "volume", "open", "high", "low", "prev_close_price", "close"]
 _EXCHANGE = "BIST"
 _TIMEOUT = 10.0
 _HEADERS = {
@@ -72,7 +73,10 @@ def parse_quote(row: dict, columns: list[str] | None = None) -> Quote | None:
         return None
 
     values = dict(zip(columns or _COLUMNS, data, strict=False))
+    # Piyasa kapaliyken lp (canli son fiyat) null gelir; son kapanisa (close) dus.
     price = _f(values.get("lp"))
+    if price is None:
+        price = _f(values.get("close"))
     if price is None:
         return None
 
