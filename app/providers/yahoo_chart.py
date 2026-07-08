@@ -48,9 +48,13 @@ class YahooChartProvider(Provider):
         bist = sym.normalize(symbol)
         yahoo_symbol = sym.to_yahoo(bist)
         async with self._sem:
+            # range=1d sart: meta.chartPreviousClose, istenen RANGE'den ONCEKI
+            # kapanistir. range=5d/1mo secilirse gunler/aylar oncesinin kapanisi
+            # gelir ve change/change_percent absurt cikar (BIST +-%10 asimi).
+            # 1d -> chartPreviousClose = gercek dunku kapanis.
             resp = await client.get(
                 f"{_BASE}{yahoo_symbol}",
-                params={"range": "5d", "interval": "1d"},
+                params={"range": "1d", "interval": "1d"},
                 headers=_HEADERS,
             )
         resp.raise_for_status()

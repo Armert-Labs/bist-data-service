@@ -63,3 +63,30 @@ async def test_fetch_quotes_empty_result():
     )
     quotes = await YahooChartProvider().fetch_quotes(["THYAO"])
     assert quotes == {}
+
+
+@respx.mock
+async def test_fetch_quotes_uses_range_1d():
+    # meta.chartPreviousClose istenen range'den ONCEKI kapanistir; dogru gunluk
+    # degisim icin range=1d olmali (gercek dunku kapanis). range=5d/1mo yanlis
+    # (gunler/aylar oncesi) previous_close verir -> absurd change_percent.
+    route = respx.get(url__startswith=_CHART_URL).mock(
+        return_value=httpx.Response(200, json=_chart_payload(334.0, 330.0))
+    )
+    await YahooChartProvider().fetch_quotes(["THYAO"])
+    request = route.calls.last.request
+    assert request.url.params.get("range") == "1d"
+    assert request.url.params.get("interval") == "1d"
+
+
+@respx.mock
+async def test_change_percent_hits_daily_limit():
+    # Gercek ornek (BETAE): price=64.35, dunku kapanis=58.5 -> +%10.0 (BIST tavan).
+    respx.get(url__startswith=_CHART_URL).mock(
+        return_value=httpx.Response(200, json=_chart_payload(64.35, 58.5))
+    )
+    quotes = await YahooChartProvider().fetch_quotes(["THYAO"])
+    q = quotes["THYAO"]
+    assert q.previous_close == 58.5
+    assert q.change == 5.85
+    assert q.change_percent == 10.0
