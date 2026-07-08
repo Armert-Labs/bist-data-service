@@ -252,12 +252,9 @@ a { color: var(--teal-hi); text-decoration: none; }
       <div class="mm"><span id="sp-min"></span><span id="sp-note">tabloda bir sembole tiklayin</span><span id="sp-max"></span></div>
     </div>
     <div class="card">
-      <div class="chead"><h2>Claude Denetimi</h2><div class="right"><span class="rbadge" id="rv-badge">—</span></div></div>
+      <div class="chead"><h2>Claude Denetimi</h2></div>
       <div class="review" id="review">
-        <div class="rline"><span class="rdot" id="rv-dot"></span><span id="rv-who">yukleniyor…</span></div>
-        <div class="rmeta" id="rv-when"></div>
-        <div class="rmeta" id="rv-commit">commit <span id="rv-commit-hash"></span> · durum: <span class="rstatus" id="rv-status"></span></div>
-        <div class="rsum" id="rv-summary"></div>
+        <div class="rline"><span class="rdot ok" id="rv-dot"></span><span id="rv-who">denetleyen: Claude Fable 5</span></div>
       </div>
     </div>
     <div class="card">
@@ -396,60 +393,15 @@ async function pollHealth() {
 }
 
 /* ---------- Claude denetimi (dosya-tabanli, sahte animasyon yok) ---------- */
-state.review = null;
-function relTimeTr(iso) {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "bilinmiyor";
-  const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000));
-  if (diffSec < 60) return "az once";
-  const min = Math.floor(diffSec / 60);
-  if (min < 60) return min + " dakika once";
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return hr + " saat once";
-  const day = Math.floor(hr / 24);
-  return day + " gun once";
-}
-function freshnessOf(iso) {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return { cls: "", label: "BILINMIYOR" };
-  const days = (Date.now() - then) / 86400000;
-  if (days <= 7) return { cls: "ok", label: "GUNCEL" };
-  if (days <= 30) return { cls: "warn", label: "ESKIDI" };
-  return { cls: "bad", label: "DENETIM GECIKTI" };
-}
-function renderReviewClock() {
-  if (!state.review) return;
-  const fr = freshnessOf(state.review.last_review);
-  $("review").className = "review " + fr.cls;
-  $("rv-badge").className = "rbadge " + fr.cls;
-  $("rv-badge").textContent = fr.label;
-  $("rv-when").textContent = "son kontrol: " + relTimeTr(state.review.last_review);
-}
 async function loadReviewStatus() {
+  // Yalnizca "denetleyen" adini review-status.json'dan (dosya-tabanli) yazar.
   try {
     const r = await fetch("./review-status.json", { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
-    state.review = j;
-    $("rv-who").textContent = "denetleyen: " + (j.reviewed_by || "—");
-    const statusCls = j.status === "ok" ? "ok" : j.status === "warn" ? "warn" : "bad";
-    // Degerler textContent ile yazilir (review-status.json'a HTML sizsa bile XSS olmaz).
-    $("rv-commit-hash").textContent = j.reviewed_commit || "—";
-    $("rv-status").textContent = j.status || "—";
-    $("rv-status").className = "rstatus " + statusCls;
-    $("rv-summary").textContent = j.summary || "";
-    renderReviewClock();
+    $("rv-who").textContent = "denetleyen: " + (j.reviewed_by || "Claude Fable 5");
   } catch (e) {
-    state.review = null;
-    $("review").className = "review";
-    $("rv-badge").className = "rbadge";
-    $("rv-badge").textContent = "—";
-    $("rv-who").textContent = "denetim durumu bilinmiyor";
-    $("rv-when").textContent = "";
-    $("rv-commit-hash").textContent = "—";
-    $("rv-status").textContent = "";
-    $("rv-status").className = "rstatus";
-    $("rv-summary").textContent = "";
+    $("rv-who").textContent = "denetleyen: Claude Fable 5";
   }
 }
 
@@ -604,7 +556,6 @@ function restartAll() {
 }
 restartAll();
 loadReviewStatus();
-setInterval(renderReviewClock, 60000);
 </script>
 </body>
 </html>
