@@ -85,6 +85,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
+# Telegram bot kullanici-yuzu metinleri kasitli Turkce/tipografik karakter icerir
+# (Acik/Kapali'daki dotless-i, en-dash, carpim isareti). RUF001 yalnizca string
+# literallerini kapsar; yorum/docstring'ler ASCII kalir (RUF002/RUF003 aktif).
+"app/telegram_bot.py" = ["RUF001"]
+"tests/test_telegram_bot.py" = ["RUF001"]
 
 # --------------------------------------------------------------------------- #
 # Mypy — statik tip kontrolu

@@ -620,6 +620,49 @@ METRICS_PUBLIC=false                       # /metrics de auth ister
 - Örnek Prometheus + Grafana yapılandırması: [`deploy/`](deploy/)
 - Yapısal JSON log + her isteğe `X-Request-ID`
 
+## 🤖 Telegram Bot
+
+BIST fiyatlarını Telegram'dan sunan **opsiyonel** bot (`bot` servisi). REST API'nin
+bir istemcisidir (ham `httpx`; `python-telegram-bot` kullanmaz). Varsayılan
+**kapalı** — `TELEGRAM_ENABLED=false` iken veya token yokken temiz çıkar (crash yok).
+
+### Kurulum
+
+1. [@BotFather](https://t.me/BotFather) → `/newbot` ile token alın.
+2. `.env` (git-ignored) dosyasına ekleyin:
+   ```env
+   TELEGRAM_ENABLED=true
+   TELEGRAM_BOT_TOKEN=123456:AA...        # ASLA repoya commit etmeyin
+   TELEGRAM_API_URL=http://api:8000       # compose ağı içinde
+   # TELEGRAM_API_KEY=...                 # BIST API auth açıksa X-API-Key
+   # TELEGRAM_ALLOWED_CHATS=123,456       # boş = herkes /start edebilir
+   ```
+3. `docker compose up -d bot`
+4. Telegram'da bota **`/start`** gönderin (chat kaydı; kayıtlı chat'ler Redis'te tutulur).
+
+### Komutlar
+
+| Komut | İşlev |
+|---|---|
+| `/start` | Chat'i kaydeder + şık karşılama |
+| `THYAO` · `/hisse THYAO` | Anlık hisse kartı (fiyat, değişim, gün içi) |
+| `/durum` | Piyasa durumu, izlenen sayı, tazelik, kaynak sağlığı |
+| `/yardim` | Komut listesi |
+| `/stop` | Bildirimleri kapatır (kaydı siler) |
+
+### Otomatik bildirimler
+
+Piyasa **açılışında** (10:00) ve **kapanışında** (18:15) tüm kayıtlı chat'lere
+_sessiz_ (bildirim sesi olmadan) mesaj gider: açılışta izlenen hisse sayısı;
+kapanışta günün en çok yükselen/düşenleri. Mesajlar HTML biçimli, emoji ve
+görsel öğelerle tasarlanmıştır (Armert × Bisteyes).
+
+### Güvenlik
+
+- Token yalnızca `.env`'den okunur; koda gömülmez, log'a sızmaz.
+- `TELEGRAM_ALLOWED_CHATS` ile `/start`'ı belirli chat'lerle sınırlayabilirsiniz.
+- Bot ağ hatasında çökmez (üstel backoff); bir chat'e teslimat hatası diğerlerini etkilemez.
+
 ## 🧪 Geliştirme
 
 ```bash

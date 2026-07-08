@@ -50,6 +50,25 @@ services:
       redis:
         condition: service_healthy
 
+  # Telegram bot (REST API istemcisi). TELEGRAM_ENABLED=false varsayilan oldugundan
+  # token verilmezse temiz cikar (exit 0). restart: on-failure -> exit 0'da DURUR
+  # (sonsuz restart dongusu olmaz), yalnizca crash'te yeniden baslar.
+  bot:
+    build: .
+    restart: on-failure
+    command: ["python", "-m", "app.telegram_bot"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_API_URL=http://api:8000
+    healthcheck:
+      disable: true
+    depends_on:
+      - api
+      - redis
+
   # Armert x Bisteyes veri kontrol paneli (statik; API'yi tarayicidan tuketir).
   panel:
     image: nginx:1.27-alpine

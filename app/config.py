@@ -256,6 +256,26 @@ class Settings:
         default_factory=lambda: _get_int("PERSISTENCE_MAX_POINTS", 500)
     )
 
+    # --- Telegram bot (REST API istemcisi; ayri surec) ---
+    # token bos/enabled=false ise bot main() temiz cikar (crash yok).
+    telegram_enabled: bool = field(default_factory=lambda: _get_bool("TELEGRAM_ENABLED", False))
+    telegram_bot_token: str = field(default_factory=lambda: _get_str("TELEGRAM_BOT_TOKEN", ""))
+    telegram_api_url: str = field(
+        default_factory=lambda: _get_str("TELEGRAM_API_URL", "http://api:8000")
+    )
+    # BIST API auth aciksa gonderilecek X-API-Key (bos ise baslik eklenmez).
+    telegram_api_key: str = field(default_factory=lambda: _get_str("TELEGRAM_API_KEY", ""))
+    telegram_poll_timeout: int = field(
+        default_factory=lambda: _get_int("TELEGRAM_POLL_TIMEOUT", 30)
+    )
+    # Bos ise herkes /start edebilir; dolu ise yalniz bu chat id'ler.
+    telegram_allowed_chats: list[str] = field(
+        default_factory=lambda: _get_list("TELEGRAM_ALLOWED_CHATS", [])
+    )
+    telegram_market_poll_seconds: float = field(
+        default_factory=lambda: _get_float("TELEGRAM_MARKET_POLL_SECONDS", 30.0)
+    )
+
     # --- Loglama ---
     log_level: str = field(default_factory=lambda: _get_str("LOG_LEVEL", "INFO"))
     log_json: bool = field(default_factory=lambda: _get_bool("LOG_JSON", True))
