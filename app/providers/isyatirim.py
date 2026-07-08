@@ -46,11 +46,26 @@ def _f(value) -> float | None:
         return None
 
 
+def _parse_date(value) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value, "%d-%m-%Y")
+    except ValueError:
+        return None
+
+
 def parse_quote(bist_symbol: str, rows: list[dict]) -> Quote | None:
     """value[] satirlarindan Quote uretir. AGSIZ; test edilebilir saf fonksiyon."""
     rows = [r for r in (rows or []) if _f(r.get("HGDG_KAPANIS")) is not None]
     if not rows:
         return None
+
+    # Is Yatirim `value[]` dizisini KRONOLOJIK sirali dondurmez (ayni istekte
+    # bile sira degisebilir). "Son fiyat" olarak dizinin son elemanini almak,
+    # eski bir gunluk cubugu secip /validate'te sahte sapma dogurur. Tarihe gore
+    # sirala; tarihsiz/bozuk satirlar en eskiye itilir (son cubuk olarak secilmez).
+    rows.sort(key=lambda r: _parse_date(r.get("HGDG_TARIH")) or datetime.min)
 
     last = rows[-1]
     prev = rows[-2] if len(rows) >= 2 else None

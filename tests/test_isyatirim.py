@@ -67,6 +67,34 @@ def test_parse_quote_skips_null_close_rows():
     assert q.previous_close == 330.0
 
 
+def test_parse_quote_sorts_unordered_rows_by_date():
+    """Is Yatirim value[] dizisini kronolojik sirali dondurmez (ayni istekte
+    bile sira degisir). Parse en guncel gunluk cubugu TARIHE gore secmeli,
+    dizideki son elemani degil. Gercek GARAN vakasi: dizide son eleman eski
+    bir cubuk (29-06) oldugu icin yanlis 'son fiyat' ve /validate'te %3 sahte
+    sapma doguyordu."""
+    scrambled = [
+        {"HGDG_TARIH": "02-07-2026", "HGDG_KAPANIS": 138.6},
+        {"HGDG_TARIH": "07-07-2026", "HGDG_KAPANIS": 134.4},  # gercek en guncel
+        {"HGDG_TARIH": "06-07-2026", "HGDG_KAPANIS": 133.7},
+        {"HGDG_TARIH": "29-06-2026", "HGDG_KAPANIS": 137.3},  # dizide SON ama en eski
+    ]
+    q = parse_quote("GARAN", scrambled)
+    assert q.price == 134.4  # 07-07 kapanisi (rows[-1]=29-06=137.3 DEGIL)
+    assert q.previous_close == 133.7  # 06-07 kapanisi (tarihe gore bir onceki)
+
+
+def test_parse_quote_unparseable_date_not_picked_as_latest():
+    """Tarihi bozuk/eksik satir en guncel cubuk olarak secilmemeli (en eskiye itilir)."""
+    rows = [
+        {"HGDG_TARIH": "06-07-2026", "HGDG_KAPANIS": 100.0},
+        {"HGDG_TARIH": "BOZUK", "HGDG_KAPANIS": 999.0},
+        {"HGDG_TARIH": "07-07-2026", "HGDG_KAPANIS": 110.0},
+    ]
+    q = parse_quote("XU", rows)
+    assert q.price == 110.0  # 07-07, bozuk-tarihli 999.0 degil
+
+
 @respx.mock
 async def test_fetch_quotes_via_http():
     respx.get(url__startswith=_BASE).mock(
