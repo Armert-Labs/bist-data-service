@@ -15,7 +15,14 @@ server {
     # BIST API reverse-proxy. Tarayici /api'ye ayni-origin gider; nginx X-API-Key'i
     # ekleyip internal API'ye (api:8000) iletir. Anahtar tarayiciya asla gitmez.
     location /api/ {
-        proxy_pass http://api:8000/;
+        # Dinamik DNS: api container'i recreate edilince (yeni IP) nginx onu 10 sn
+        # icinde yeniden cozer. proxy_pass'i DEGISKENLE vermek, nginx'in upstream IP'yi
+        # baslangicta bir kez cozup cache'lemesini engeller (yoksa eski IP -> 502).
+        # rewrite: /api/ onekini soyar (degisken proxy_pass otomatik URI soymaz).
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $bist_api api:8000;
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass http://$bist_api;
         proxy_set_header X-API-Key "${DASH_API_KEY}";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
