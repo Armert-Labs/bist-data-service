@@ -565,12 +565,13 @@ class Bot:
     async def handle_message(self, chat_id: int, text: str) -> None:
         cmd, arg = parse_command(text)
 
+        # Guvenlik: TUM komutlar yalniz izinli chat'lerden (admin grubu/kisi) islenir.
+        # Bos allowlist = herkes. Yoksa rastgele biri /hisse ile veri cekemez.
+        if not self._is_allowed(chat_id):
+            await self._tg.send_message(chat_id, "⛔ Bu bot yalnizca izinli kullanicilar icindir.")
+            return
+
         if cmd == "/start":
-            if not self._is_allowed(chat_id):
-                await self._tg.send_message(
-                    chat_id, "⛔ Bu bot yalnizca izinli kullanicilar icindir."
-                )
-                return
             await self._registry.add(chat_id)
             count = await self._api.get_symbols_count()
             await self._tg.send_message(chat_id, format_welcome(count))

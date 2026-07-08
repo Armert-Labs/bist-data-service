@@ -584,3 +584,20 @@ def test_format_quote_card_change_none_omits_change():
     assert "12,50 ₺" in card
     assert "(-%)" not in card
     assert "- (-" not in card
+
+
+async def test_all_commands_require_allowed_chat(override_settings):
+    # Guvenlik: izinsiz chat HICBIR komuttan yanit alamaz (yalniz ret mesaji).
+    override_settings(telegram_allowed_chats=["-5130097143"])
+    q = {"symbol": "THYAO", "price": 10.0, "change": 0.1, "change_percent": 1.0}
+    tg, api, reg = _FakeTelegram(), _FakeApi(quote=q), tb.ChatRegistry()
+    bot = tb.Bot(tg, api, reg)
+    await bot.handle_message(999, "/hisse THYAO")  # izinsiz
+    assert len(tg.sent) == 1 and "izinli" in tg.sent[0][1].lower()
+    assert all("THYAO" not in t for _, t in tg.sent)  # veri karti gitmedi
+
+    # izinli grup calisir
+    tg2 = _FakeTelegram()
+    bot2 = tb.Bot(tg2, _FakeApi(quote=q), tb.ChatRegistry())
+    await bot2.handle_message(-5130097143, "/durum")
+    assert tg2.sent and "izinli" not in tg2.sent[0][1].lower()
