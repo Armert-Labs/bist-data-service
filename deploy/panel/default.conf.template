@@ -1,0 +1,31 @@
+# Panel nginx: dashboard statik + /api reverse-proxy (X-API-Key sunucu-tarafinda).
+# nginx:alpine entrypoint bu template'i envsubst ile isler; yalnizca ortamdaki
+# DASH_API_KEY degiskeni degistirilir ($uri/$host gibi nginx degiskenleri korunur).
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Dashboard statik dosyalari (index.html, review-status.json ...)
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # BIST API reverse-proxy. Tarayici /api'ye ayni-origin gider; nginx X-API-Key'i
+    # ekleyip internal API'ye (api:8000) iletir. Anahtar tarayiciya asla gitmez.
+    location /api/ {
+        proxy_pass http://api:8000/;
+        proxy_set_header X-API-Key "${DASH_API_KEY}";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_http_version 1.1;
+
+        # SSE (/api/stream): tamponlama kapali, uzun timeout, chunked kapali.
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        chunked_transfer_encoding off;
+    }
+}

@@ -69,12 +69,17 @@ services:
       - api
       - redis
 
-  # Armert x Bisteyes veri kontrol paneli (statik; API'yi tarayicidan tuketir).
+  # Armert x Bisteyes veri kontrol paneli. nginx dashboard'u sunar VE /api'yi
+  # api:8000'e reverse-proxy'ler (X-API-Key sunucu-tarafinda eklenir; ayni-origin).
   panel:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    environment:
+      # Uretimde .env'den gelir; lokalde (auth kapali) bos olabilir.
+      - DASH_API_KEY=${DASH_API_KEY:-}
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro
+      - ./deploy/panel/default.conf.template:/etc/nginx/templates/default.conf.template:ro
     ports:
       - "8080:80"
     depends_on:

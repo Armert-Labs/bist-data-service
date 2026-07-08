@@ -253,10 +253,13 @@ a { color: var(--teal-hi); text-decoration: none; }
 <script>
 "use strict";
 /* ---------- durum ---------- */
+// Ayni-origin: panel (nginx) /api'yi API'ye reverse-proxy'ler ve X-API-Key'i
+// SUNUCU-TARAFINDA ekler; tarayici anahtari hic gormez. Boylece API internal
+// kalir, dashboard erisimi Zero Trust ile korunur.
 const LS = { base: "bisteyes.apiBase", key: "bisteyes.apiKey" };
 const state = {
-  base: localStorage.getItem(LS.base) || (location.protocol.startsWith("http") ? location.protocol + "//" + location.hostname + ":8000" : "http://localhost:8000"),
-  key: localStorage.getItem(LS.key) || "",
+  base: "/api",
+  key: "",
   quotes: new Map(),
   sort: { k: "symbol", dir: 1 },
   filter: "",
