@@ -254,6 +254,20 @@ def _parse_symbols(raw: str | None) -> list[str]:
     return list(dict.fromkeys(parsed))
 
 
+def _check_symbol_limit(requested: list[str]) -> None:
+    """/quotes ve /validate icin sembol sayisi ust sinirini uygular.
+
+    Asiri sayida sembol (her biri cache'te yoksa upstream provider'lara tek
+    tek dusebilir) kaynaklari zorlayan bir DoS yuzeyi olusturmasin.
+    """
+    limit = settings.max_symbols_per_request
+    if limit > 0 and len(requested) > limit:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cok fazla sembol: {len(requested)} istendi, ust sinir {limit}.",
+        )
+
+
 async def _get_or_fetch(symbol: str) -> Quote | None:
     cached = await store.get_quote(symbol)
     if cached is not None:
@@ -444,6 +458,7 @@ async def get_quotes(
     symbols: str | None = Query(default=None, description="Virgulle ayrilmis, orn. THYAO,GARAN"),
 ) -> dict:
     requested = _parse_symbols(symbols)
+    _check_symbol_limit(requested)
 
     if not requested:
         data = await store.get_all()
@@ -562,6 +577,7 @@ async def validate(
     Iki kaynagin uyumu, verinin bozulmadiginin gostergesidir.
     """
     syms = _parse_symbols(symbols) or REFERENCE_SYMBOLS
+    _check_symbol_limit(syms)
 
     primary = await store.get_quotes(syms)
     missing = [s for s in syms if s not in primary]

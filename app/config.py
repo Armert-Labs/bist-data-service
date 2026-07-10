@@ -234,9 +234,19 @@ class Settings:
     demo_enabled: bool = field(default_factory=lambda: _get_bool("DEMO_ENABLED", False))
     # /metrics herkese acik mi. Guvenli varsayilan: false (auth ister).
     metrics_public: bool = field(default_factory=lambda: _get_bool("METRICS_PUBLIC", False))
-    cors_origins: list[str] = field(default_factory=lambda: _get_list("CORS_ORIGINS", ["*"]))
+    # Guvenli varsayilan: bos (same-origin only, cross-origin tarayici istegi
+    # reddedilir). Dashboard/panel nginx reverse-proxy ile ayni-origin gittigi
+    # icin (bkz. deploy/panel) bu varsayilan onu ETKILEMEZ. Cross-origin bir
+    # tarayici istemciniz varsa CORS_ORIGINS ile acikca izin verin.
+    cors_origins: list[str] = field(default_factory=lambda: _get_list("CORS_ORIGINS", []))
     rate_limit: str = field(default_factory=lambda: _get_str("RATE_LIMIT", "120/minute"))
     rate_limit_enabled: bool = field(default_factory=lambda: _get_bool("RATE_LIMIT_ENABLED", True))
+    # /quotes ve /validate icin sembol listesi ust siniri: tek istekte asiri
+    # sayida sembol (her biri cache'te yoksa upstream provider'lara tek tek
+    # dusebilir) kaynaklari zorlayan bir DoS yuzeyi olusturmasin.
+    max_symbols_per_request: int = field(
+        default_factory=lambda: _get_int("MAX_SYMBOLS_PER_REQUEST", 100)
+    )
 
     # --- SSE ---
     stream_interval: float = field(default_factory=lambda: _get_float("STREAM_INTERVAL", 5.0))

@@ -617,6 +617,8 @@ METRICS_PUBLIC=false                       # /metrics de auth ister
 ## 📊 Gözlemlenebilirlik
 
 - API metrikleri: `:8000/metrics` · Updater iş metrikleri: `:8001/metrics`
+- cAdvisor (container bazlı bellek/CPU/OOM metrikleri): `:8081` (host port `8080` zaten
+  `panel` servisi tarafından kullanıldığı için `8081:8080` ile eşlenir)
 - Örnek Prometheus + Grafana yapılandırması: [`deploy/`](deploy/)
 - Yapısal JSON log + her isteğe `X-Request-ID`
 
@@ -685,6 +687,8 @@ Ayrıntılar için [CONTRIBUTING.md](CONTRIBUTING.md).
 | `UPDATE_INTERVAL` | `60` | Güncelleme aralığı (sn) |
 | `STALENESS_SECONDS` | `300` | Bayatlık eşiği (`/ready`) |
 | `RATE_LIMIT` | `120/minute` | IP başına limit |
+| `MAX_SYMBOLS_PER_REQUEST` | `100` | `/quotes` ve `/validate` için tek istekteki sembol sayısı üst sınırı |
+| `CORS_ORIGINS` | *(boş)* | Güvenli varsayılan: same-origin only. Panel/dashboard nginx reverse-proxy ile aynı-origin gittiği için etkilenmez; cross-origin bir tarayıcı istemciniz varsa açıkça set edin |
 
 Tam liste: [`.env.example`](.env.example)
 

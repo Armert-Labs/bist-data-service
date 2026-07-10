@@ -344,6 +344,42 @@ def test_validate_reports_compared_flag(monkeypatch):
         assert body["compared"] is False
 
 
+def test_quotes_symbol_limit_boundary_passes(override_settings):
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    override_settings(max_symbols_per_request=5)
+    store = get_store()
+    now = datetime.now(UTC)
+    syms = [f"S{i:03d}" for i in range(5)]
+    store._quotes = {s: Quote(symbol=s, price=1.0, updated_at=now) for s in syms}
+    store._last_update = now
+    with TestClient(app) as c:
+        r = c.get("/quotes", params={"symbols": ",".join(syms)})
+        assert r.status_code == 200
+        assert r.json()["count"] == 5
+
+
+def test_quotes_symbol_limit_exceeded_rejected(override_settings):
+    override_settings(max_symbols_per_request=5)
+    with TestClient(app) as c:
+        syms = ",".join(f"S{i:03d}" for i in range(6))
+        r = c.get("/quotes", params={"symbols": syms})
+        assert r.status_code == 400
+        assert "5" in r.json()["detail"]
+
+
+def test_validate_symbol_limit_exceeded_rejected(override_settings):
+    override_settings(max_symbols_per_request=5)
+    with TestClient(app) as c:
+        syms = ",".join(f"S{i:03d}" for i in range(6))
+        r = c.get("/validate", params={"symbols": syms})
+        assert r.status_code == 400
+        assert "5" in r.json()["detail"]
+
+
 def test_validate_threshold_from_settings(monkeypatch, override_settings):
     from app.models import Quote
 
