@@ -12,8 +12,8 @@ _EXECUTOR; varsayilan asyncio executor'u PAYLASILMAZ — bkz. asagidaki not).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
@@ -50,6 +50,29 @@ def _new_timeout_session():
         logger.debug("curl_cffi bulunamadi; yfinance varsayilan oturumu kullanacak")
         return None
     return curl_requests.Session(impersonate="chrome", timeout=settings.provider_fetch_timeout)
+
+
+# yfinance 1.5.1'de YfData process-genelinde bir Singleton'dur (tek session,
+# tek cookie/crumb hep bu instance'a bagli). Her fetch'te YENI bir session
+# olusturup set etmek "son yazan kazanir" yarisina yol acar: _EXECUTOR(2)
+# icinde eszamanli iki yahoo fetch'i calisirken biri diger devam eden istegin
+# session'ini degistirebilir/finally'de kapatabilirdi. Bunun yerine TEK,
+# uzun-omurlu, timeout'lu oturum lazy + kilitle bir kez kurulur ve process
+# omru boyunca YASAR — hicbir fetch onu kapatmaz.
+_SESSION_LOCK = threading.Lock()
+_SHARED_SESSION = None
+_SHARED_SESSION_INITIALIZED = False
+
+
+def _get_shared_session():
+    global _SHARED_SESSION, _SHARED_SESSION_INITIALIZED
+    if _SHARED_SESSION_INITIALIZED:
+        return _SHARED_SESSION
+    with _SESSION_LOCK:
+        if not _SHARED_SESSION_INITIALIZED:
+            _SHARED_SESSION = _new_timeout_session()
+            _SHARED_SESSION_INITIALIZED = True
+    return _SHARED_SESSION
 
 
 def _safe_float(value, ndigits: int | None = None) -> float | None:
@@ -119,7 +142,6 @@ def fetch_quotes(symbols: list[str]) -> dict[str, Quote]:
 
     yahoo_syms = [sym.to_yahoo(s) for s in clean]
     result: dict[str, Quote] = {}
-    session = _new_timeout_session()
 
     try:
         data = yf.download(
@@ -135,7 +157,9 @@ def fetch_quotes(symbols: list[str]) -> dict[str, Quote]:
             # kotulestiriyordu (timeout'un zamaninda tetiklenmesini geciktiriyor).
             threads=False,
             progress=False,
-            session=session,
+            # Paylasilan, uzun-omurlu session (bkz. _get_shared_session): burada
+            # KAPATILMAZ — yfinance'in Singleton YfData'siyla paylasilir.
+            session=_get_shared_session(),
             # HTTP timeout: to_thread'deki takili istekler thread havuzunu
             # doldurmasin (cycle butcesi coroutine'i iptal eder ama thread'i edemez).
             timeout=settings.provider_fetch_timeout,
@@ -143,10 +167,6 @@ def fetch_quotes(symbols: list[str]) -> dict[str, Quote]:
     except Exception as exc:
         logger.warning("yf.download hatasi (%d sembol): %s", len(yahoo_syms), exc)
         return {}
-    finally:
-        if session is not None:
-            with contextlib.suppress(Exception):
-                session.close()
 
     if data is None or len(data) == 0:
         return {}
@@ -185,10 +205,11 @@ def fetch_history(symbol: str, period: str = "1mo", interval: str = "1d") -> His
     bist = sym.normalize(symbol)
     yahoo_symbol = sym.to_yahoo(bist)
     bars: list[HistoryBar] = []
-    session = _new_timeout_session()
 
     try:
-        ticker = yf.Ticker(yahoo_symbol, session=session)
+        # Paylasilan, uzun-omurlu session (bkz. _get_shared_session): burada
+        # KAPATILMAZ — yfinance'in Singleton YfData'siyla paylasilir.
+        ticker = yf.Ticker(yahoo_symbol, session=_get_shared_session())
         df = ticker.history(
             period=period,
             interval=interval,
@@ -198,10 +219,6 @@ def fetch_history(symbol: str, period: str = "1mo", interval: str = "1d") -> His
     except Exception as exc:
         logger.warning("history hatasi %s: %s", yahoo_symbol, exc)
         df = None
-    finally:
-        if session is not None:
-            with contextlib.suppress(Exception):
-                session.close()
 
     if df is not None and not df.empty:
         for idx, row in df.iterrows():

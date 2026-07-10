@@ -19,13 +19,15 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
 - **Canlı donma (hang) fix'i:** `yfinance`'in Yahoo crumb/cookie auth isteği (curl_cffi) bazı
   koşullarda süresiz asılıp güncelleme turunu tıkıyordu (yalnız süreç restart'ı açıyordu).
   Üç katmanlı fix:
-  - Aggregator artık her kaynağı `PROVIDER_FETCH_TIMEOUT` ile sarmalıyor; bir kaynak asılırsa
-    circuit breaker'a hata kaydedilip sonraki kaynağa düşülüyor (dış iptal/`CancelledError`
-    bundan ayrı tutulur, yutulmaz).
-  - `yahoo` (yfinance) provider'ı: `yf.download(threads=False)`, kendi timeout'lu
-    session'ı (crumb isteği dahil) + `finally`'de `session.close()`, ve varsayılan asyncio
-    executor'ından izole, sınırlı (`max_workers=2`) bir `ThreadPoolExecutor` kullanıyor —
-    bir hang artık uygulamanın geri kalanını (paylaşılan thread havuzu) zehirlemiyor.
+  - Aggregator artık her kaynağı (quote **ve** history yolunda) `PROVIDER_FETCH_TIMEOUT`
+    ile sarmalıyor; bir kaynak asılırsa circuit breaker'a hata kaydedilip sonraki kaynağa
+    düşülüyor (dış iptal/`CancelledError` bundan ayrı tutulur, yutulmaz).
+  - `yahoo` (yfinance) provider'ı: `yf.download(threads=False)`, tüm çağrılar için (crumb
+    dahil) TEK, uzun ömürlü, timeout'lu paylaşılan session (yfinance 1.5.1'in process-geneli
+    `YfData` Singleton'ıyla uyumlu; per-call oluşturup kapatmak eşzamanlı fetch'lerin
+    birbirinin session'ını kapatmasına yol açabiliyordu — bkz. review bulgusu), ve varsayılan
+    asyncio executor'ından izole, sınırlı (`max_workers=2`) bir `ThreadPoolExecutor` kullanıyor
+    — bir hang artık uygulamanın geri kalanını (paylaşılan thread havuzu) zehirlemiyor.
   - Varsayılan `PROVIDERS` sırasından `yahoo` çıkarıldı (`yahoo_chart,tradingview,isyatirim`
     oldu); `yahoo_chart` aynı Yahoo verisini crumb'sız, saf async `httpx` ile sağlıyor.
     `yahoo` provider sınıfı silinmedi, `PROVIDERS` env'i ile geri eklenebilir.

@@ -281,6 +281,55 @@ async def test_provider_timeout_outer_cancel_does_not_record_failure(override_se
     assert breaker._failures == 0
 
 
+async def test_history_timeout_falls_back_to_next_source(override_settings):
+    # Quote yolundaki ayni wedge korumasi history icin de gecerli olmali:
+    # asilan bir history saglayicisi sert timeout ile kesilir, breaker
+    # basarisizlik kaydeder, sonraki kaynaktan bar gelir.
+    from datetime import UTC, datetime
+
+    from app.models import HistoryBar
+
+    override_settings(provider_fetch_timeout=0.05)
+
+    class HangingHistory(FakeProvider):
+        async def fetch_history(self, symbol, period, interval):
+            await asyncio.Event().wait()  # hicbir zaman donmez
+
+    class WithBars(FakeProvider):
+        async def fetch_history(self, symbol, period, interval):
+            return HistoryResponse(
+                symbol=symbol,
+                period=period,
+                interval=interval,
+                bars=[HistoryBar(time=datetime(2026, 1, 1, tzinfo=UTC), close=10.0)],
+            )
+
+    hanging = HangingHistory("yahoo")
+    backup = WithBars("isyatirim")
+    agg = _agg([hanging, backup])
+    res = await agg.fetch_history("THYAO", "1mo", "1d")
+    assert len(res.bars) == 1
+    _, breaker = agg._providers[0]
+    assert breaker._failures == 1
+
+
+async def test_history_timeout_outer_cancel_does_not_record_failure(override_settings):
+    # Disaridan gelen iptal history yolunda da yutulmamali (quote yolunun
+    # simetrigi): CancelledError yukari yayilmali, breaker'a hic kayit dusmemeli.
+    override_settings(provider_fetch_timeout=10.0)
+
+    class HangingHistory(FakeProvider):
+        async def fetch_history(self, symbol, period, interval):
+            await asyncio.Event().wait()
+
+    hanging = HangingHistory("yahoo")
+    agg = _agg([hanging])
+    _, breaker = agg._providers[0]
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(agg.fetch_history("THYAO", "1mo", "1d"), timeout=0.05)
+    assert breaker._failures == 0
+
+
 async def test_history_skips_non_history_provider_and_keeps_quotes():
     """supports_history=False kaynak (orn. TradingView), bos history yuzunden
     breaker'i actirmamali; QUOTE hizmeti korunmali."""
