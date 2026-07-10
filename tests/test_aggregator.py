@@ -1,5 +1,7 @@
 """Aggregator testleri: failover, sanity-check, circuit breaker (fake provider'larla)."""
 
+import asyncio
+
 import app.aggregator as aggregator_module
 import pytest
 from app.aggregator import Aggregator
@@ -237,6 +239,46 @@ async def test_all_providers_failing_returns_empty():
     agg = _agg([FakeProvider("yahoo", fail=True), FakeProvider("isyatirim", fail=True)])
     res = await agg.fetch_quotes(["THYAO"])
     assert res == {}  # exception yukari sizmaz, mevcut store verisi korunur
+
+
+async def test_provider_timeout_falls_back_to_next_source(override_settings):
+    # yfinance/curl_cffi wedge senaryosu: bir kaynak sonsuza kadar asilirsa
+    # sert timeout onu keser, breaker basarisizlik kaydeder, sonraki kaynaktan
+    # veri gelir ve tur SUSMUYOR (asilmiyor).
+    override_settings(provider_fetch_timeout=0.05)
+
+    class HangingProvider(FakeProvider):
+        async def fetch_quotes(self, symbols):
+            self.calls += 1
+            await asyncio.Event().wait()  # hicbir zaman donmez
+
+    hanging = HangingProvider("yahoo")
+    backup = FakeProvider("isyatirim", {"THYAO": Quote(symbol="THYAO", price=50.0)})
+    agg = _agg([hanging, backup])
+    res = await agg.fetch_quotes(["THYAO"])
+    assert res["THYAO"].price == 50.0
+    assert backup.calls == 1
+    _, breaker = agg._providers[0]
+    assert breaker._failures == 1
+
+
+async def test_provider_timeout_outer_cancel_does_not_record_failure(override_settings):
+    # Disaridan (guncelleme turu butcesi gibi) gelen bir iptal, provider-timeout
+    # olarak YUTULMAMALI: CancelledError yukari yayilmali ve breaker'a basarisizlik
+    # KAYDEDILMEMELI (dis butce coroutine'i iptal eder, thread'i degil).
+    override_settings(provider_fetch_timeout=10.0)  # ic timeout disaridakinden uzun
+
+    class HangingProvider(FakeProvider):
+        async def fetch_quotes(self, symbols):
+            self.calls += 1
+            await asyncio.Event().wait()
+
+    hanging = HangingProvider("yahoo")
+    agg = _agg([hanging])
+    _, breaker = agg._providers[0]
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(agg.fetch_quotes(["THYAO"]), timeout=0.05)
+    assert breaker._failures == 0
 
 
 async def test_history_skips_non_history_provider_and_keeps_quotes():

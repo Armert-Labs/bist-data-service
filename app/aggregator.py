@@ -10,6 +10,7 @@ Kapsam kontrolu: kismi/bos yanit basarisiz sayilir (circuit breaker tetiklenir).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -165,7 +166,25 @@ class Aggregator:
 
             metrics.FETCH_REQUESTS.labels(provider=provider.name).inc()
             try:
-                fetched = await provider.fetch_quotes(ask)
+                fetched = await asyncio.wait_for(
+                    provider.fetch_quotes(ask), settings.provider_fetch_timeout
+                )
+            except TimeoutError:
+                # NOT: disaridan (guncelleme turu butcesi) gelen bir iptal burada
+                # YAKALANMAZ — o CancelledError'dur (BaseException), Exception'dan
+                # TUREMEZ, bu try/except'i atlayip yukari yayilir. Bu blok yalnizca
+                # BU cagrinin KENDI ic zaman asimini (provider_fetch_timeout) yakalar.
+                breaker.record_failure()
+                metrics.FETCH_ERRORS.labels(provider=provider.name).inc()
+                metrics.PROVIDER_UP.labels(provider=provider.name).set(1 if breaker.healthy else 0)
+                for s in ask:
+                    symbol_circuit.record_failure(provider.name, s)
+                logger.warning(
+                    "%s fetch zaman asimi (%.0f sn), sonraki kaynaga dusuluyor",
+                    provider.name,
+                    settings.provider_fetch_timeout,
+                )
+                continue
             except Exception as exc:
                 breaker.record_failure()
                 metrics.FETCH_ERRORS.labels(provider=provider.name).inc()
