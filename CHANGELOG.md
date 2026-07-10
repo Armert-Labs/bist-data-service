@@ -14,6 +14,13 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
 - Genişletilmiş CI (lint + tip kontrolü + kapsam + matris + Docker imajı)
 - `Makefile`, Prometheus + Grafana örnek yapılandırmaları
 - `PROVIDER_FETCH_TIMEOUT` (varsayılan 45sn) — tek `provider.fetch_quotes()` çağrısı için sert üst sınır
+- `MAX_SYMBOLS_PER_REQUEST` (varsayılan 100) — `/quotes` ve `/validate` için tek istekte sembol sayısı üst sınırı; aşımda 400
+- `docker-compose.yml`'e `cadvisor` servisi — VM140 Prometheus'un container bazlı bellek/CPU/OOM metriklerini scrape edebilmesi için (host port `8081:8080`; `panel` zaten `8080:80` kullandığından port çakışmasını önlemek için `8081` seçildi — bkz. Güvenlik notu)
+
+### Güvenlik
+- CI (`ci.yml`): üst seviye `permissions: contents: read` eklendi (`release.yml`'deki desenle tutarlı, en az yetki ilkesi)
+- `CORS_ORIGINS` varsayılanı `*` → boş (same-origin only) değiştirildi. Panel/dashboard nginx reverse-proxy ile aynı-origin gittiği için (bkz. `deploy/panel/default.conf.template`) bu değişiklik canlı paneli etkilemez; cross-origin bir tarayıcı istemciniz varsa `CORS_ORIGINS` ile açıkça izin verin
+- **cAdvisor port notu (operasyonel, dikkat):** VM130'da host port `8080` zaten `panel` servisi tarafından kullanıldığından (`8080:80`, canlı public dashboard) cAdvisor `8081:8080` ile eşlendi. Daha önce ayrı bir işte VM140 Prometheus scrape hedefi `10.10.10.130:8080` olarak yapılandırılmıştı — bu hedefin `10.10.10.130:8081` olarak güncellenmesi gerekiyor, aksi halde cAdvisor scrape edilemez.
 
 ### Düzeltildi
 - **Canlı donma (hang) fix'i:** `yfinance`'in Yahoo crumb/cookie auth isteği (curl_cffi) bazı

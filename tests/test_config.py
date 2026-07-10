@@ -74,6 +74,36 @@ def test_provider_fetch_timeout_env_override(monkeypatch):
     assert Settings().provider_fetch_timeout == 12.5
 
 
+def test_cors_origins_default_is_same_origin_only(monkeypatch):
+    """Guvenli varsayilan: bos liste (cross-origin tarayici istegi reddedilir).
+    Panel/dashboard nginx reverse-proxy ile ayni-origin gittigi icin bu
+    varsayilandan etkilenmez (bkz. deploy/panel/default.conf.template)."""
+    from app.config import Settings
+
+    monkeypatch.delenv("CORS_ORIGINS", raising=False)
+    assert Settings().cors_origins == []
+
+
+def test_cors_origins_env_override(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv("CORS_ORIGINS", "https://ornek.com")
+    assert Settings().cors_origins == ["https://ornek.com"]
+
+
+def test_max_symbols_per_request_default():
+    from app.config import Settings
+
+    assert Settings().max_symbols_per_request == 100
+
+
+def test_max_symbols_per_request_env_override(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv("MAX_SYMBOLS_PER_REQUEST", "50")
+    assert Settings().max_symbols_per_request == 50
+
+
 def test_default_providers_excludes_yahoo_from_live_chain(monkeypatch):
     """yahoo (yfinance/curl_cffi crumb wedge riski) varsayilan zincirden cikarildi;
     yahoo_chart onceki yerini alir. Provider sinifi hala PROVIDERS env'i ile geri

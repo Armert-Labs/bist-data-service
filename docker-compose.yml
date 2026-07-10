@@ -85,5 +85,24 @@ services:
     depends_on:
       - api
 
+  # cAdvisor: VM140 Prometheus'un container-bazi bellek/CPU/OOM metriklerini
+  # scrape edebilmesi icin. NOT: host port 8080 zaten yukaridaki 'panel'
+  # servisi tarafindan kullaniliyor (8080:80); canli public dashboard'u (nginx
+  # panel) riske atmamak icin cAdvisor host'ta 8081'e baglanir (container ici
+  # sabit :8080, degistirilemez). Prometheus scrape hedefi buna gore
+  # 10.10.10.130:8081 olmali (bkz. commit mesaji / PM'e giden rapor).
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "8081:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    mem_limit: 128m
+
 volumes:
   redis-data:
