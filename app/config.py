@@ -76,12 +76,14 @@ class Settings:
     max_concurrent_fetch: int = field(default_factory=lambda: _get_int("MAX_CONCURRENT_FETCH", 8))
 
     # --- Kaynak / dogrulama ---
-    # Oncelik sirasi. yahoo=yfinance(batch), yahoo_chart=v8 chart(dayanikli),
-    # isyatirim=Turkiye (yurtdisi IP'lerden erisilemeyebilir).
+    # Oncelik sirasi. yahoo_chart=v8 chart (saf async httpx, crumb'siz, dayanikli),
+    # isyatirim=Turkiye (yurtdisi IP'lerden erisilemeyebilir). yahoo=yfinance(batch)
+    # varsayilan zincirden CIKARILDI: crumb/cookie auth istegi (curl_cffi) bazen
+    # sonsuza kadar asilip thread havuzunu doldurabiliyor (bkz. PROVIDER_FETCH_TIMEOUT
+    # + yahoo provider'daki izole executor). Provider sinifi silinmedi; env ile
+    # geri eklenebilir (PROVIDERS=yahoo,yahoo_chart,...).
     providers: list[str] = field(
-        default_factory=lambda: _get_list(
-            "PROVIDERS", ["yahoo", "yahoo_chart", "tradingview", "isyatirim"]
-        )
+        default_factory=lambda: _get_list("PROVIDERS", ["yahoo_chart", "tradingview", "isyatirim"])
     )
     # failover: ilk veri donduren kaynak yeter (verimli).
     # gapfill: her kaynak bir oncekinin eksiklerini tamamlar (kesintisizlik, onerilen).
@@ -90,6 +92,14 @@ class Settings:
     # Provider yanit kapsam esigi (%). Altinda kalan yanit basarisiz sayilir.
     provider_min_coverage_pct: float = field(
         default_factory=lambda: _get_float("PROVIDER_MIN_COVERAGE_PCT", 95.0)
+    )
+    # Tek bir provider.fetch_quotes() cagrisi icin sert ust sinir (sn). Bir kaynak
+    # (orn. yfinance/curl_cffi auth istegi) sonsuza kadar asilirsa bu sinir
+    # asildiginda cagri iptal edilir, breaker basarisizlik kaydeder ve sonraki
+    # kaynaga dusulur. Disaridan (updater cycle butcesi) gelen iptal bundan
+    # AYRIDIR ve yutulmaz (CancelledError yukari yayilir).
+    provider_fetch_timeout: float = field(
+        default_factory=lambda: _get_float("PROVIDER_FETCH_TIMEOUT", 45.0)
     )
     # Sembol bazli devre kesici
     symbol_circuit_fail_threshold: int = field(

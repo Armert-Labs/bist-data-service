@@ -17,7 +17,7 @@ Kaynaklar: **Yahoo Finance** (yfinance + v8 chart) + **İş Yatırım** (bağım
 ## ✨ Özellikler
 
 - 🔌 **Tek uç noktadan tüm BIST** — `GET /all` ile ~500+ hissenin anlık fiyatı
-- 🔁 **Üç katmanlı fallback** — Yahoo → Yahoo chart → İş Yatırım + circuit breaker
+- 🔁 **Çok katmanlı fallback** — Yahoo chart → TradingView → İş Yatırım + circuit breaker
 - 📡 **Canlı akış** — Redis pub/sub tabanlı SSE fan-out (`/stream`)
 - ✅ **Fiyat doğrulama** — çapraz-kaynak karşılaştırma + sapma metriği (`/validate`)
 - 🔐 **Kimlik doğrulama** — çoklu API key, timing-safe, SHA-256 hash saklama
@@ -679,8 +679,9 @@ Ayrıntılar için [CONTRIBUTING.md](CONTRIBUTING.md).
 | Değişken | Varsayılan | Açıklama |
 |---|---|---|
 | `REDIS_URL` | *(boş)* | Boş = in-memory. Compose: `redis://redis:6379/0` |
-| `PROVIDERS` | `yahoo,yahoo_chart,isyatirim` | Kaynak fallback zinciri |
+| `PROVIDERS` | `yahoo_chart,tradingview,isyatirim` | Kaynak fallback zinciri (`yahoo` yfinance/curl_cffi auth-asılma riski nedeniyle varsayılandan çıkarıldı; provider silinmedi, env ile geri eklenebilir) |
 | `PROVIDER_MODE` | `failover` | `failover` \| `gapfill` |
+| `PROVIDER_FETCH_TIMEOUT` | `45` | Tek `provider.fetch_quotes()` çağrısı için sert üst sınır (sn); aşılırsa sonraki kaynağa düşülür |
 | `UPDATE_INTERVAL` | `60` | Güncelleme aralığı (sn) |
 | `STALENESS_SECONDS` | `300` | Bayatlık eşiği (`/ready`) |
 | `RATE_LIMIT` | `120/minute` | IP başına limit |

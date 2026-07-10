@@ -4,24 +4,52 @@ BIST hisseleri icin ~15 dakika gecikmeli, halka acik veriyi ceker.
 - fetch_quotes(): coklu sembolu tek batch istekte anlik goruntu olarak ceker.
 - fetch_history(): tek sembol icin gecmis OHLCV cubuklarini ceker.
 
-Tum yfinance cagrilari senkrondur; cagiran taraf (updater / API) bunlari
-`asyncio.to_thread` ile sararak event loop'u bloke etmemelidir.
+Tum yfinance cagrilari senkrondur; cagiran taraf bunlari izole bir
+ThreadPoolExecutor'da calistirarak event loop'u bloke etmemelidir (asagida
+_EXECUTOR; varsayilan asyncio executor'u PAYLASILMAZ — bkz. asagidaki not).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import pandas as pd
 import yfinance as yf
 
 from .. import symbols as sym
+from ..config import settings
 from ..models import HistoryBar, HistoryResponse, Quote
 from .base import Provider
 
 logger = logging.getLogger(__name__)
+
+# yfinance/curl_cffi'nin crumb-auth istegi bazen sonsuza kadar asilabilir
+# (bkz. PROVIDER_FETCH_TIMEOUT); asilan cagriyi calistiran OS thread'i asyncio
+# tarafindan oldurulemez. Bu izole, sinirli havuz o sizintiyi en fazla 2
+# worker'a hapseder; varsayilan asyncio executor'u (ve diger to_thread
+# kullanicilarini) zehirlemez.
+_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yahoo-fetch")
+
+
+def _new_timeout_session():
+    """yfinance'in TUM isteklerine (crumb/cookie auth DAHIL) connect+read
+    timeout uygulayan kendi oturumumuzu olusturur.
+
+    yf.download(timeout=...) bu degeri crumb/cookie auth cagrisina UYGULAMAZ
+    (yfinance o adimda kendi ic varsayilanini kullanir) — Yahoo yanit vermezse
+    cagiran thread suresiz asilabilir. curl_cffi yoksa (beklenmeyen ortam)
+    yfinance kendi varsayilan oturumunu kurar; None doner.
+    """
+    try:
+        from curl_cffi import requests as curl_requests
+    except ImportError:
+        logger.debug("curl_cffi bulunamadi; yfinance varsayilan oturumu kullanacak")
+        return None
+    return curl_requests.Session(impersonate="chrome", timeout=settings.provider_fetch_timeout)
 
 
 def _safe_float(value, ndigits: int | None = None) -> float | None:
@@ -91,6 +119,7 @@ def fetch_quotes(symbols: list[str]) -> dict[str, Quote]:
 
     yahoo_syms = [sym.to_yahoo(s) for s in clean]
     result: dict[str, Quote] = {}
+    session = _new_timeout_session()
 
     try:
         data = yf.download(
@@ -100,15 +129,24 @@ def fetch_quotes(symbols: list[str]) -> dict[str, Quote]:
             group_by="ticker",
             auto_adjust=False,
             actions=False,
-            threads=True,
+            # threads=False: yf.download'in KENDI ic ticker-basina thread havuzunu
+            # kapatir. Acikken bir crumb-auth asilmasi cycle basina onlarca OS
+            # thread'i dogurup contention'i artiriyor, bu da ayni asilmayi daha da
+            # kotulestiriyordu (timeout'un zamaninda tetiklenmesini geciktiriyor).
+            threads=False,
             progress=False,
+            session=session,
             # HTTP timeout: to_thread'deki takili istekler thread havuzunu
             # doldurmasin (cycle butcesi coroutine'i iptal eder ama thread'i edemez).
-            timeout=30,
+            timeout=settings.provider_fetch_timeout,
         )
     except Exception as exc:
         logger.warning("yf.download hatasi (%d sembol): %s", len(yahoo_syms), exc)
         return {}
+    finally:
+        if session is not None:
+            with contextlib.suppress(Exception):
+                session.close()
 
     if data is None or len(data) == 0:
         return {}
@@ -147,13 +185,23 @@ def fetch_history(symbol: str, period: str = "1mo", interval: str = "1d") -> His
     bist = sym.normalize(symbol)
     yahoo_symbol = sym.to_yahoo(bist)
     bars: list[HistoryBar] = []
+    session = _new_timeout_session()
 
     try:
-        ticker = yf.Ticker(yahoo_symbol)
-        df = ticker.history(period=period, interval=interval, auto_adjust=False)
+        ticker = yf.Ticker(yahoo_symbol, session=session)
+        df = ticker.history(
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            timeout=settings.provider_fetch_timeout,
+        )
     except Exception as exc:
         logger.warning("history hatasi %s: %s", yahoo_symbol, exc)
         df = None
+    finally:
+        if session is not None:
+            with contextlib.suppress(Exception):
+                session.close()
 
     if df is not None and not df.empty:
         for idx, row in df.iterrows():
@@ -175,12 +223,19 @@ def fetch_history(symbol: str, period: str = "1mo", interval: str = "1d") -> His
 
 
 class YahooProvider(Provider):
-    """yfinance senkron cagrilarini thread-pool'da calistiran async saglayici."""
+    """yfinance senkron cagrilarini izole thread-pool'da calistiran async saglayici.
+
+    asyncio.to_thread yerine ozel _EXECUTOR kullanilir: bir cagri gercekten
+    asilirsa (crumb wedge) yalnizca bu 2 worker'lik havuzu tuketir, uygulamanin
+    geri kalaninin paylastigi varsayilan executor'u zehirlemez.
+    """
 
     name = "yahoo"
 
     async def fetch_quotes(self, symbols: list[str]) -> dict[str, Quote]:
-        return await asyncio.to_thread(fetch_quotes, symbols)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_EXECUTOR, fetch_quotes, symbols)
 
     async def fetch_history(self, symbol: str, period: str, interval: str) -> HistoryResponse:
-        return await asyncio.to_thread(fetch_history, symbol, period, interval)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_EXECUTOR, fetch_history, symbol, period, interval)

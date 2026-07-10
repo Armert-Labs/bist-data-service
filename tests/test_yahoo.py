@@ -1,8 +1,10 @@
 """Yahoo (yfinance) provider testleri — yf.download monkeypatch ile agsiz."""
 
+import threading
+
 import pandas as pd
 from app.providers import yahoo
-from app.providers.yahoo import _safe_float, _safe_int
+from app.providers.yahoo import YahooProvider, _safe_float, _safe_int
 
 
 def test_safe_float():
@@ -45,3 +47,72 @@ def test_fetch_quotes_empty_frame(monkeypatch):
 def test_fetch_quotes_invalid_symbol_filtered():
     # Gecersiz sembol hic Yahoo'ya gitmeden elenir.
     assert yahoo.fetch_quotes(["!!!"]) == {}
+
+
+def test_fetch_quotes_passes_threads_false(monkeypatch):
+    # yf.download'in KENDI ic multitasking thread havuzu kapatilmali: asilan bir
+    # crumb istegi ticker basina ayri thread yerine TEK cagriyi bloke eder.
+    captured = {}
+
+    def fake_download(*args, **kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(yahoo.yf, "download", fake_download)
+    yahoo.fetch_quotes(["THYAO"])
+    assert captured["threads"] is False
+
+
+class _FakeSession:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_fetch_quotes_closes_session_after_success(monkeypatch):
+    fake_session = _FakeSession()
+    monkeypatch.setattr(yahoo, "_new_timeout_session", lambda: fake_session)
+    captured = {}
+
+    def fake_download(*args, **kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(yahoo.yf, "download", fake_download)
+    yahoo.fetch_quotes(["THYAO"])
+    assert captured["session"] is fake_session
+    assert fake_session.closed is True
+
+
+def test_fetch_quotes_closes_session_after_error(monkeypatch):
+    fake_session = _FakeSession()
+    monkeypatch.setattr(yahoo, "_new_timeout_session", lambda: fake_session)
+
+    def fake_download(*args, **kwargs):
+        raise RuntimeError("yahoo coktu")
+
+    monkeypatch.setattr(yahoo.yf, "download", fake_download)
+    assert yahoo.fetch_quotes(["THYAO"]) == {}
+    assert fake_session.closed is True
+
+
+async def test_yahoo_provider_runs_in_isolated_executor(monkeypatch):
+    # Varsayilan asyncio executor'unu (ve dolayisiyla diger to_thread
+    # kullanicilarini) paylasmamali; kendi izole ThreadPoolExecutor'unda
+    # calismali.
+    seen_thread_names = []
+
+    def fake_fetch_quotes(symbols):
+        seen_thread_names.append(threading.current_thread().name)
+        return {}
+
+    monkeypatch.setattr(yahoo, "fetch_quotes", fake_fetch_quotes)
+    provider = YahooProvider()
+    await provider.fetch_quotes(["THYAO"])
+    assert seen_thread_names[0].startswith("yahoo-fetch")
+
+
+def test_isolated_executor_is_bounded():
+    assert yahoo._EXECUTOR._max_workers == 2

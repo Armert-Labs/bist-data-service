@@ -13,6 +13,22 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
 - GitHub şablonları (issue/PR), Dependabot, CODEOWNERS
 - Genişletilmiş CI (lint + tip kontrolü + kapsam + matris + Docker imajı)
 - `Makefile`, Prometheus + Grafana örnek yapılandırmaları
+- `PROVIDER_FETCH_TIMEOUT` (varsayılan 45sn) — tek `provider.fetch_quotes()` çağrısı için sert üst sınır
+
+### Düzeltildi
+- **Canlı donma (hang) fix'i:** `yfinance`'in Yahoo crumb/cookie auth isteği (curl_cffi) bazı
+  koşullarda süresiz asılıp güncelleme turunu tıkıyordu (yalnız süreç restart'ı açıyordu).
+  Üç katmanlı fix:
+  - Aggregator artık her kaynağı `PROVIDER_FETCH_TIMEOUT` ile sarmalıyor; bir kaynak asılırsa
+    circuit breaker'a hata kaydedilip sonraki kaynağa düşülüyor (dış iptal/`CancelledError`
+    bundan ayrı tutulur, yutulmaz).
+  - `yahoo` (yfinance) provider'ı: `yf.download(threads=False)`, kendi timeout'lu
+    session'ı (crumb isteği dahil) + `finally`'de `session.close()`, ve varsayılan asyncio
+    executor'ından izole, sınırlı (`max_workers=2`) bir `ThreadPoolExecutor` kullanıyor —
+    bir hang artık uygulamanın geri kalanını (paylaşılan thread havuzu) zehirlemiyor.
+  - Varsayılan `PROVIDERS` sırasından `yahoo` çıkarıldı (`yahoo_chart,tradingview,isyatirim`
+    oldu); `yahoo_chart` aynı Yahoo verisini crumb'sız, saf async `httpx` ile sağlıyor.
+    `yahoo` provider sınıfı silinmedi, `PROVIDERS` env'i ile geri eklenebilir.
 
 ## [0.1.0] - 2026-07-05
 

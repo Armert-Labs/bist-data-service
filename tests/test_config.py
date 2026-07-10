@@ -59,3 +59,28 @@ def test_market_holidays_none_sentinel_clears_defaults(monkeypatch):
     assert Settings().market_holidays == []
     monkeypatch.delenv("MARKET_HOLIDAYS")
     assert "2026-10-29" in Settings().market_holidays
+
+
+def test_provider_fetch_timeout_default():
+    from app.config import Settings
+
+    assert Settings().provider_fetch_timeout == 45.0
+
+
+def test_provider_fetch_timeout_env_override(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv("PROVIDER_FETCH_TIMEOUT", "12.5")
+    assert Settings().provider_fetch_timeout == 12.5
+
+
+def test_default_providers_excludes_yahoo_from_live_chain(monkeypatch):
+    """yahoo (yfinance/curl_cffi crumb wedge riski) varsayilan zincirden cikarildi;
+    yahoo_chart onceki yerini alir. Provider sinifi hala PROVIDERS env'i ile geri
+    eklenebilir (silinmedi)."""
+    from app.config import Settings
+
+    monkeypatch.delenv("PROVIDERS", raising=False)
+    cfg = Settings()
+    assert cfg.providers == ["yahoo_chart", "tradingview", "isyatirim"]
+    assert "yahoo" not in cfg.providers
