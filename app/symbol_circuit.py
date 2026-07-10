@@ -13,6 +13,12 @@ logger = logging.getLogger(__name__)
 class SymbolCircuitRegistry:
     """Provider basina sembol bazli hata sayaci."""
 
+    # /quote/{symbol} ve /quotes?symbols= sembolu yalnizca BICIM olarak dogrular
+    # (gercek watchlist uyeligini degil); tek seferlik (typo/bot) sorgular
+    # buraya hicbir zaman esige ulasmayan "kapali" kayitlar birakabilir. Tavan +
+    # budama olmadan bu, sinirsiz bellek buyumesine yol acar.
+    _MAX_ENTRIES = 4096
+
     def __init__(
         self,
         fail_threshold: int | None = None,
@@ -44,6 +50,8 @@ class SymbolCircuitRegistry:
 
     def record_failure(self, provider: str, symbol: str) -> None:
         key = self._key(provider, symbol)
+        if key not in self._failures and len(self._failures) >= self._MAX_ENTRIES:
+            self._evict_garbage()
         count = self._failures.get(key, 0) + 1
         self._failures[key] = count
         if count >= self._fail_threshold:
@@ -54,6 +62,20 @@ class SymbolCircuitRegistry:
                 symbol,
                 count,
             )
+
+    def _evict_garbage(self) -> None:
+        """Tavan asilinca once ACIK OLMAYAN (esige ulasmamis) kayitlari budar —
+        bunlar tipik olarak tek-seferlik gecersiz/typo sembol sorgularidir.
+        Hala doluysa (hepsi acik) en eski acilan yarisini budar; gercek aktif
+        devre kesiciler tamamen kaybolmaz, yalnizca en eskiler feda edilir."""
+        closed_keys = [k for k in self._failures if k not in self._opened_at]
+        for k in closed_keys:
+            self._failures.pop(k, None)
+        if len(self._failures) >= self._MAX_ENTRIES:
+            oldest = sorted(self._opened_at.items(), key=lambda kv: kv[1])
+            for k, _ in oldest[: len(oldest) // 2]:
+                self._failures.pop(k, None)
+                self._opened_at.pop(k, None)
 
 
 symbol_circuit = SymbolCircuitRegistry()

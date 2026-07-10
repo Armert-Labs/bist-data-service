@@ -152,6 +152,11 @@ class _MemorySubscriber:
 
 class MemoryStore(Store):
     _NEGATIVE_MAX = 4096
+    # /history/{symbol} sembolu yalnizca BICIM olarak dogrular (gercek watchlist
+    # uyeligini degil); farkli sembol x period x interval kombinasyonlariyla
+    # tek seferlik (typo/bot) sorgular tavan+budama olmadan onbellegi sinirsiz
+    # buyutebilir (bkz. _negative ile ayni desen).
+    _HISTORY_CACHE_MAX = 4096
 
     def __init__(self) -> None:
         self._quotes: dict[str, Quote] = {}
@@ -207,6 +212,13 @@ class MemoryStore(Store):
         self, symbol: str, period: str, interval: str, data: HistoryResponse
     ) -> None:
         key = (symbol.upper(), period, interval)
+        if key not in self._history_cache and len(self._history_cache) >= self._HISTORY_CACHE_MAX:
+            now = time.monotonic()
+            expired = [k for k, v in self._history_cache.items() if v[0] <= now]
+            for k in expired:
+                self._history_cache.pop(k, None)
+            if len(self._history_cache) >= self._HISTORY_CACHE_MAX:
+                self._history_cache.clear()
         self._history_cache[key] = (
             time.monotonic() + settings.history_cache_ttl,
             data,
