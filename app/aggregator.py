@@ -255,11 +255,24 @@ class Aggregator:
             if not breaker.allow():
                 continue
             try:
-                result = await provider.fetch_history(symbol, period, interval)
+                result = await asyncio.wait_for(
+                    provider.fetch_history(symbol, period, interval),
+                    settings.provider_fetch_timeout,
+                )
                 if result.bars:
                     breaker.record_success()
                     return result
                 breaker.record_failure()
+            except TimeoutError:
+                # NOT: dis iptal (CancelledError) burada YAKALANMAZ — quote
+                # yolundaki asyncio.wait_for ile ayni koruma (bkz. fetch_quotes).
+                breaker.record_failure()
+                logger.warning(
+                    "%s history zaman asimi (%.0f sn), sonraki kaynaga dusuluyor",
+                    provider.name,
+                    settings.provider_fetch_timeout,
+                )
+                continue
             except Exception as exc:
                 breaker.record_failure()
                 logger.warning("%s history hatasi: %s", provider.name, exc)

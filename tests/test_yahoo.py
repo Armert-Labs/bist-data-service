@@ -71,31 +71,77 @@ class _FakeSession:
         self.closed = True
 
 
-def test_fetch_quotes_closes_session_after_success(monkeypatch):
-    fake_session = _FakeSession()
-    monkeypatch.setattr(yahoo, "_new_timeout_session", lambda: fake_session)
-    captured = {}
+def _reset_shared_session(monkeypatch):
+    """Testler arasi izolasyon: modul-seviyesi paylasilan session state'ini sifirla."""
+    monkeypatch.setattr(yahoo, "_SHARED_SESSION", None)
+    monkeypatch.setattr(yahoo, "_SHARED_SESSION_INITIALIZED", False)
+
+
+def test_fetch_quotes_reuses_shared_session_across_calls(monkeypatch):
+    # yfinance 1.5.1 YfData process-genelinde Singleton: her cagride YENI bir
+    # session yaratip set etmek "son yazan kazanir" yarisina yol acar (izole
+    # executor'da 2 eszamanli fetch birbirinin session'ini calabilir). Bu yuzden
+    # TEK, uzun-omurlu, lazy-init session kullanilmali; her fetch AYNI objeyi
+    # almali.
+    _reset_shared_session(monkeypatch)
+    created = []
+
+    def fake_new_session():
+        s = _FakeSession()
+        created.append(s)
+        return s
+
+    monkeypatch.setattr(yahoo, "_new_timeout_session", fake_new_session)
+    captured_sessions = []
 
     def fake_download(*args, **kwargs):
-        captured.update(kwargs)
+        captured_sessions.append(kwargs.get("session"))
         return pd.DataFrame()
 
     monkeypatch.setattr(yahoo.yf, "download", fake_download)
     yahoo.fetch_quotes(["THYAO"])
-    assert captured["session"] is fake_session
-    assert fake_session.closed is True
+    yahoo.fetch_quotes(["GARAN"])
+
+    assert len(created) == 1  # yalnizca ilk cagride kuruldu
+    assert captured_sessions[0] is captured_sessions[1] is created[0]
 
 
-def test_fetch_quotes_closes_session_after_error(monkeypatch):
+def test_fetch_quotes_never_closes_shared_session_on_success_or_error(monkeypatch):
+    # Paylasilan session process omru boyunca yasar; hicbir fetch onu
+    # kapatmamali (eszamanli baska bir fetch'in devam eden istegini kesmesin).
+    _reset_shared_session(monkeypatch)
     fake_session = _FakeSession()
     monkeypatch.setattr(yahoo, "_new_timeout_session", lambda: fake_session)
 
-    def fake_download(*args, **kwargs):
+    monkeypatch.setattr(yahoo.yf, "download", lambda *a, **k: pd.DataFrame())
+    yahoo.fetch_quotes(["THYAO"])
+    assert fake_session.closed is False
+
+    def fake_download_error(*args, **kwargs):
         raise RuntimeError("yahoo coktu")
 
-    monkeypatch.setattr(yahoo.yf, "download", fake_download)
-    assert yahoo.fetch_quotes(["THYAO"]) == {}
-    assert fake_session.closed is True
+    monkeypatch.setattr(yahoo.yf, "download", fake_download_error)
+    assert yahoo.fetch_quotes(["GARAN"]) == {}
+    assert fake_session.closed is False
+
+
+def test_fetch_history_uses_shared_session_and_never_closes(monkeypatch):
+    _reset_shared_session(monkeypatch)
+    fake_session = _FakeSession()
+    monkeypatch.setattr(yahoo, "_new_timeout_session", lambda: fake_session)
+    captured = {}
+
+    class _FakeTicker:
+        def __init__(self, *args, **kwargs):
+            captured["session"] = kwargs.get("session")
+
+        def history(self, *args, **kwargs):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(yahoo.yf, "Ticker", _FakeTicker)
+    yahoo.fetch_history("THYAO")
+    assert captured["session"] is fake_session
+    assert fake_session.closed is False
 
 
 async def test_yahoo_provider_runs_in_isolated_executor(monkeypatch):
