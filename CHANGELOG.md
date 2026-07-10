@@ -29,6 +29,13 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
   - Varsayılan `PROVIDERS` sırasından `yahoo` çıkarıldı (`yahoo_chart,tradingview,isyatirim`
     oldu); `yahoo_chart` aynı Yahoo verisini crumb'sız, saf async `httpx` ile sağlıyor.
     `yahoo` provider sınıfı silinmedi, `PROVIDERS` env'i ile geri eklenebilir.
+- **Sınırsız bellek büyümesi hardening:** `/quote/{symbol}`, `/quotes`, `/history/{symbol}`
+  sembolü yalnızca BİÇİM olarak doğrular (gerçek takip listesi üyeliğini değil). Kod
+  incelemesinde tavan/periyodik temizliği olmayan iki dict tespit edildi ve `_negative`
+  önbellekle aynı tavan+budama desenine kavuşturuldu: `SymbolCircuitRegistry._failures`/
+  `_opened_at` (tek seferlik/typo sembol sorguları kalıcı "kapalı" kayıt bırakıyordu) ve
+  `MemoryStore._history_cache` (sembol×period×interval kombinasyonları hiç temizlenmiyordu).
+  İkisi de artık 4096 kayıt tavanına sahip.
 
 ## [0.1.0] - 2026-07-05
 

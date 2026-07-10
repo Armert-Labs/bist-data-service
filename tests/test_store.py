@@ -124,6 +124,25 @@ async def test_history_cache_roundtrip():
     assert got is not None and len(got.bars) == 1
 
 
+async def test_history_cache_bounded_growth():
+    # /history/{symbol} sembolu yalnizca BICIM olarak dogrular; farkli
+    # sembol x period x interval kombinasyonlariyla tek seferlik (typo/bot)
+    # sorgular onbellegi sonsuza kadar biriktirmemeli (bkz. _negative ile
+    # ayni tavan+budama deseni).
+    from app.models import HistoryResponse
+
+    store = MemoryStore()
+    await store.connect()
+    for i in range(store._HISTORY_CACHE_MAX + 500):
+        await store.set_history_cached(
+            f"FAKE{i}",
+            "1mo",
+            "1d",
+            HistoryResponse(symbol=f"FAKE{i}", period="1mo", interval="1d", bars=[]),
+        )
+    assert len(store._history_cache) <= store._HISTORY_CACHE_MAX
+
+
 async def test_subscribe_symbol_filter():
     store = MemoryStore()
     await store.connect()

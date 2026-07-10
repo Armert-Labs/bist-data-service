@@ -41,3 +41,28 @@ def test_success_resets_counter():
     reg.record_success("yahoo", "THYAO")
     reg.record_failure("yahoo", "THYAO")
     assert reg.allow("yahoo", "THYAO") is True  # basari sayaci sifirladi
+
+
+def test_never_repeated_symbols_do_not_grow_without_bound():
+    # /quote/{symbol} ve /quotes?symbols= gecerli BICIM disinda watchlist
+    # dogrulamasi yapmaz; tek seferlik (typo/bot) sembol sorgulari _failures'i
+    # sonsuza kadar biriktirmemeli.
+    reg = SymbolCircuitRegistry(fail_threshold=100, reset_timeout=60.0)
+    for i in range(reg._MAX_ENTRIES + 500):
+        reg.record_failure("yahoo", f"FAKE{i}")
+    assert len(reg._failures) <= reg._MAX_ENTRIES
+
+
+def test_open_circuit_survives_garbage_eviction():
+    # Gercek (watchlist) sembolun ACIK devresi, budama sirasinda tek-seferlik
+    # kapali cop kayitlarla birlikte silinmemeli.
+    reg = SymbolCircuitRegistry(fail_threshold=3, reset_timeout=9999.0)
+    for _ in range(3):
+        reg.record_failure("yahoo", "THYAO")
+    assert reg.allow("yahoo", "THYAO") is False
+
+    for i in range(reg._MAX_ENTRIES + 500):
+        reg.record_failure("yahoo", f"FAKE{i}")  # her biri tek hata, esige ulasmaz
+
+    assert reg.allow("yahoo", "THYAO") is False  # acik devre budanmadi
+    assert len(reg._failures) <= reg._MAX_ENTRIES
