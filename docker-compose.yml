@@ -92,7 +92,11 @@ services:
   # sabit :8080, degistirilemez). Prometheus scrape hedefi buna gore
   # 10.10.10.130:8081 olmali (bkz. commit mesaji / PM'e giden rapor).
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    # v0.49.1 Docker'in containerd-snapshotter modunu desteklemiyor ("failed to
+    # identify the read-write layer ID", dockerVersion="" -> container'lar
+    # gorunmuyor). Fix upstream'de v0.54+ (google/cadvisor PR #3709). gcr.io'da
+    # v0.54.0 tag'i yok; en yakin >=v0.54 olan v0.54.1 kullanildi.
+    image: gcr.io/cadvisor/cadvisor:v0.54.1
     restart: unless-stopped
     privileged: true
     ports:
