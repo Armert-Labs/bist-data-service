@@ -1,6 +1,6 @@
 # --- Build asamasi: bagimliliklari ve paketi derle ---
 # 3.13: CI test matrisiyle ayni surum (3.14 hicbir testten gecmiyordu).
-FROM python:3.13-slim AS builder
+FROM python:3.14-slim AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1
@@ -14,7 +14,7 @@ COPY app ./app
 RUN pip install --no-cache-dir --prefix=/install --no-deps .
 
 # --- Runtime asamasi: yalin, root olmayan ---
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
