@@ -134,9 +134,14 @@ class Settings:
     # (market.seconds_since_open) guard-dususleri streak'e YAZILMAZ (guard
     # yine calisir, bayat veri gecmez -- yalniz cooldown'u TETIKLEMEZ).
     # Kaynaklar acilisin ilk saniyelerinde henuz dunku barlarini guncellemiyor
-    # olabilir; bu yapisal bir gecikme, kalici bir ariza degil.
+    # olabilir; bu yapisal bir gecikme, kalici bir ariza degil. Varsayilan
+    # 1200sn (20 dk): veri ~15 dk gecikmeli (bkz. README/delayed=True) --
+    # acilista yahoo_chart'in regularMarketTime'i bugune ait damga uretmesi
+    # bu gecikme + tampon kadar surebilir (canlida dogrulanmadi -- comert
+    # varsayilan tercih edildi; 300sn iken 10:05-10:07 arasi streak esigi
+    # asip her islem gunu ~10:37'ye kadar kor kalmaya yol acabiliyordu).
     guard_open_grace_seconds: float = field(
-        default_factory=lambda: _get_float("GUARD_OPEN_GRACE_SECONDS", 300.0)
+        default_factory=lambda: _get_float("GUARD_OPEN_GRACE_SECONDS", 1200.0)
     )
     # MEDIUM-2: streak'in yaslanmasi -- son artistan bu kadar saniye sonra
     # hicbir yeni tam-dusme olmadiysa streak SIFIRLANIR. Aksi halde sabah
@@ -145,6 +150,18 @@ class Settings:
     # bozulur). 0 = kapali (asla yaslanma ile sifirlanmaz).
     guard_drop_streak_max_age_seconds: float = field(
         default_factory=lambda: _get_float("GUARD_DROP_STREAK_MAX_AGE_SECONDS", 900.0)
+    )
+    # HIGH-1 (review-2): fail-open esigi KAYNAK SAYISINA degil BATCH
+    # BUYUKLUGUNE bagli -- TradingView cikarildi + Is Yatirim EOD-only
+    # (intraday_capable=False) oldugu icin seans icinde TEK intraday kaynak
+    # kaldi; "en az 2 kaynak" sarti bu dunyada asla saglanamaz, fail-open'i
+    # olu birakirdi. Bir batch'in TAMAMI (>= bu esik) TEK bir kaynaktan bile
+    # ayni anda guard'a duserse (buyuk/cesitli bir sembol kumesinin HEPSİ)
+    # bu tesadufi degildir -- sistemik bir isarettir. On-demand tek-sembol
+    # istekler (len(symbols)=1) esigin cok altinda kalir, fail-open'i hic
+    # tetiklemez.
+    guard_fail_open_min_symbols: int = field(
+        default_factory=lambda: _get_int("GUARD_FAIL_OPEN_MIN_SYMBOLS", 20)
     )
     # Yazma aninda capraz-kaynak dogrulama (on-demand icin varsayilan acik).
     write_cross_validate: bool = field(

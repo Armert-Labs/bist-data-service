@@ -102,7 +102,15 @@ def _with_live_state(q: Quote, state: str) -> Quote:
     # "simdi"den ileride kalabilir (orn. isyatirim'in kapanis-zamani tahmini);
     # data_age_seconds negatif GORUNMEMELI.
     age = max((datetime.now(UTC) - reference).total_seconds(), 0.0) if reference else None
-    stale = age is not None and state == "OPEN" and age > settings.staleness_seconds
+    age_based_stale = age is not None and state == "OPEN" and age > settings.staleness_seconds
+    # MEDIUM-1 (review-2): aggregator'in HIGH-3 fail-open yolunda quote'a
+    # koydugu `stale=True` (bkz. aggregator.fetch_quotes) buraya kadar
+    # ULAŞMIYORDU -- asagidaki model_copy KOŞULSUZ ezip yeniden hesapliyordu
+    # (ustelik yalniz market OPEN'ken True olabiliyordu). Fail-open ozellikle
+    # "veri stale isaretiyle geciyor" diye belgelenmisti (README/CHANGELOG) --
+    # bu vaat tutulmuyordu. Artik provider/aggregator'in koydugu bayrak
+    # KORUNUR (OR'lanir), yas-tabanli hesap yalniz EK bir sebep olarak calisir.
+    stale = q.stale or age_based_stale
     return q.model_copy(
         update={
             "market_state": state,
