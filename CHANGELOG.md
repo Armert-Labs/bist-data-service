@@ -265,6 +265,55 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
   (guard zaten her turda düşüreceği için sorgulamak yapısal olarak bosuna bir
   istekti). Bu, cooldown mekanizmasının ihtiyacını da azaltır.
 
+### Düzeltildi (devam 2) — cooldown/fail-open tek-intraday-kaynak dünyasına göre yeniden tasarım (3 HIGH + 3 MEDIUM + 2 LOW)
+- **Kök neden (üçünün de ortak nedeni):** TradingView çıkarıldı + İş Yatırım
+  `intraday_capable=False` olduğu için seans içinde **TEK intraday kaynak**
+  (`yahoo_chart`) kaldı. Cooldown ve fail-open bir önceki turda "birden fazla
+  kaynak var" dünyası için tasarlanmıştı; o dünya artık yok.
+- **HIGH-1 (fail-open seans içinde yapısal olarak tetiklenemiyordu):** eski
+  koşul (`>=2 kaynak sorgulandı`) seans içinde asla sağlanamazdı (sözlüğe
+  yalnız `yahoo_chart` girer) — bilinmeyen bir tatilde tüm gün karanlık +
+  `bist_guard_fail_open_total` hiç artmazdı (alarm bile yok). Fail-open eşiği
+  artık **kaynak sayısına değil batch büyüklüğüne** bağlı:
+  `len(symbols) >= GUARD_FAIL_OPEN_MIN_SYMBOLS` (varsayılan 20). Tek kaynakta
+  da çalışır, on-demand tek-sembol yolunda (`len(symbols)=1`) tetiklenmez.
+- **HIGH-2 (cooldown tek intraday kaynağı susturup feed'i kendi kendine
+  kesiyordu):** cooldown'un amacı "bozuk kaynağı dövme, diğerleri servis
+  etsin"di — diğerleri yoksa bu artık kendi kendine sabotajdı. İki katman
+  eklendi: **(a)** cooldown yalnız `>=2` intraday-capable kaynak varsa fiilen
+  uygulanır (yoksa guard yine bayat veriyi eler, sayaç izlenebilirlik için
+  birikir, ama provider her tur yeniden denenir); **(b)** cooldown
+  uygulandığında bile **half-open**: tur başına 1 "prob" denemesi yapılır,
+  başarılı olursa cooldown **anında** kalkar (tam süreyi beklemez).
+- **HIGH-3 (`GUARD_OPEN_GRACE_SECONDS=300` < ~15 dk besleme gecikmesi):**
+  veri ~15 dk gecikmeli; açılışta kaynağın bugüne ait damga üretmesi bu
+  gecikme + tampon kadar sürebilir — 300sn'lik grace, açılıştan ~10 dk sonra
+  biterek her işlem gününün ilk yarım saatini köreltiyordu. Varsayılan
+  **1200sn (20 dk)** yapıldı; HIGH-2(a) fix'i bunu zaten ölümcül olmaktan
+  çıkarır ama iki koruma birlikte durur.
+- **MEDIUM-1 (fail-open'ın `stale=True` işareti tüketiciye ulaşmıyordu):**
+  `main.py::_with_live_state` bu bayrağı `model_copy` ile koşulsuz eziyordu
+  (üstelik yalnız `market_state=="OPEN"` iken `True` olabiliyordu) —
+  README/CHANGELOG'un "veri stale işaretiyle geçirilir" vaadi tutulmuyordu.
+  Artık `stale = q.stale or (yaş-tabanlı hesap)` — provider/aggregator'ın
+  koyduğu bayrak korunur.
+- **MEDIUM-2 (`end_cycle()` iptal-güvenli değildi):** `updater_cycle_timeout`
+  aşımında `CancelledError` enjekte edilir; `try/finally` olmadan
+  `end_cycle()` hiç çalışmaz, biriken guard-drop bilgisi sessizce kaybolurdu.
+  `updater._update_once()`'a `try/finally` eklendi.
+- **MEDIUM-3 (testler üretim varsayılan zincirini hiç koşmuyordu):** bu
+  yüzden HIGH-1 kaçmıştı. Gerçek `Aggregator()` + gerçek `IsYatirimProvider`
+  (gerçek `intraday_capable=False`) + `PROVIDERS=[yahoo_chart, isyatirim]` +
+  seans açık ile uçtan uca entegrasyon testi eklendi.
+- **LOW-1:** fail-open'ın erken `return result`'ı aynı batch'teki İLGİSİZ
+  (guard'la değil sanity ile reddedilen) sembollerin kaçış (escape) fırsatını
+  sessizce atlıyordu (fail-open eşiği gevşeyince canlı bir bug olurdu) —
+  artık escape bloğu fail-open sonrası da normal çalışır.
+- **LOW-2:** bir turda herhangi bir batch fail-open'a girerse, aynı turdaki
+  BAŞKA batch'lerin "tam düştü" bilgisi de birleştirilmiyordu (karma turda
+  streak yine birikebiliyordu) — artık fail-open'ın olduğu tur, TÜM
+  provider'lar için veto edilir (streak'e hiçbir şey yazılmaz).
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi

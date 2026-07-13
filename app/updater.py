@@ -58,22 +58,29 @@ class BackgroundUpdater:
         # False kalir -- bugun islem gormemis tek bir hissenin tekrarli
         # on-demand sorgusu bir kaynagi TUM semboller icin cooldown'a sokmasin).
         aggregator.begin_cycle()
-        for start in range(0, len(self._symbols), batch_size):
-            if self._stop.is_set():
-                break
-            batch = self._symbols[start : start + batch_size]
-            quotes = await aggregator.fetch_quotes(
-                batch, previous=previous, count_toward_cooldown=True
-            )
-            if quotes:
-                await commit_quotes(self._store, quotes, market=state)
-                for s, q in quotes.items():
-                    if q.price is not None:
-                        previous[s] = q.price
-                    source_counts[q.source] += 1
-                total += len(quotes)
-            await asyncio.sleep(settings.batch_pause)
-        aggregator.end_cycle()
+        try:
+            for start in range(0, len(self._symbols), batch_size):
+                if self._stop.is_set():
+                    break
+                batch = self._symbols[start : start + batch_size]
+                quotes = await aggregator.fetch_quotes(
+                    batch, previous=previous, count_toward_cooldown=True
+                )
+                if quotes:
+                    await commit_quotes(self._store, quotes, market=state)
+                    for s, q in quotes.items():
+                        if q.price is not None:
+                            previous[s] = q.price
+                        source_counts[q.source] += 1
+                    total += len(quotes)
+                await asyncio.sleep(settings.batch_pause)
+        finally:
+            # MEDIUM-2 (review-2): butce asiminda (updater_cycle_timeout)
+            # asyncio.wait_for bu coroutine'e CancelledError enjekte eder --
+            # try/finally OLMADAN end_cycle() hic calismaz, biriken guard-drop
+            # bilgisi sessizce kaybolur (ne streak artar ne sifirlanir). Artik
+            # iptal edilse bile TUR sonu degerlendirmesi HER ZAMAN calisir.
+            aggregator.end_cycle()
 
         duration = time.monotonic() - started
         metrics.UPDATE_DURATION.observe(duration)

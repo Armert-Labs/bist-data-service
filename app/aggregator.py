@@ -55,6 +55,15 @@ class Aggregator:
         # yok (begin_cycle cagrilmadi) -- bu durumda count_toward_cooldown=True
         # gecilse bile HICBIR SEY biriktirilmez (savunma amacli no-op).
         self._cycle_fully_dropped: dict[str, bool] | None = None
+        # HIGH-2(b): cooldown'da olan bir provider'a TUR basina EN FAZLA 1
+        # "prob" (half-open) denemesi -- circuit-breaker half-open deseniyle
+        # ayni ruh. None = aktif tur yok.
+        self._cooldown_probed_this_cycle: set[str] | None = None
+        # LOW-2: bu TUR icinde HERHANGI bir batch fail-open'a girdiyse tum
+        # turun guard-drop degerlendirmesi VETO edilir (bkz. end_cycle) --
+        # fail-open sistemik bir isarettir, ayni turdaki BASKA batch'lerin
+        # "tam dustu" bilgisi de suphelidir.
+        self._cycle_fail_open_occurred: bool = False
         for name in settings.providers:
             factory = _FACTORY.get(name)
             if factory is None:
@@ -167,6 +176,8 @@ class Aggregator:
         cooldown).
         """
         self._cycle_fully_dropped = {}
+        self._cooldown_probed_this_cycle = set()
+        self._cycle_fail_open_occurred = False
 
     def end_cycle(self, now: datetime | None = None) -> None:
         """Tur sonunda (tum batch'ler bitince) biriken durumu DEGERLENDIRIR.
@@ -175,10 +186,25 @@ class Aggregator:
         toleransi (`GUARD_OPEN_GRACE_SECONDS`): seans acilisindan hemen
         sonraki pencerede tam guard-dususleri streak'e YAZILMAZ -- guard yine
         calisir (bayat/damgasiz veri gecmez), yalniz cooldown'u TETIKLEMEZ.
+
+        LOW-2: bu turda HERHANGI bir batch fail-open'a girdiyse (bkz.
+        fetch_quotes) TUM turun guard-drop degerlendirmesi atlanir --
+        fail-open zaten sistemik bir isaret oldugundan, ayni turun BASKA
+        batch'lerinde biriken "tam dustu" bilgisi de suphelidir; hicbir
+        provider'in streak'i bu turdan etkilenmemelidir.
         """
         accumulated = self._cycle_fully_dropped
+        fail_open_occurred = self._cycle_fail_open_occurred
         self._cycle_fully_dropped = None
+        self._cooldown_probed_this_cycle = None
+        self._cycle_fail_open_occurred = False
         if accumulated is None:
+            return
+        if fail_open_occurred:
+            logger.debug(
+                "Bu turda fail-open olustu -- guard-drop streak degerlendirmesi "
+                "TUM tur icin atlandi (sistemik sinyal, provider'a atfedilmez)."
+            )
             return
         moment = now or datetime.now(UTC)
         since_open = seconds_since_open(moment)
@@ -218,6 +244,28 @@ class Aggregator:
         self._guard_drop_streak[provider_name] = streak
         self._guard_drop_streak_updated_at[provider_name] = now_m
         if streak >= settings.guard_cooldown_fail_threshold:
+            # HIGH-2(a): cooldown'un amaci "bozuk kaynagi dovme, DIGERLERI
+            # servis etsin"dir -- yararlanacak baska bir intraday-capable
+            # kaynak yoksa (bu provider'in kendisi intraday-capable VE
+            # toplamda tek intraday-capable kaynaksa) bu provider'i susturmak
+            # feed'i KENDI KENDINE keser (TV cikti + isyatirim EOD-only
+            # dunyasinda yahoo_chart TEK kalir). Bu durumda cooldown
+            # UYGULANMAZ -- guard yine bayat veriyi eler, ama provider her
+            # tur yeniden denenir (streak izlenebilirlik icin birikmeye
+            # devam eder).
+            provider_obj = next((p for p, _ in self._providers if p.name == provider_name), None)
+            is_this_intraday = bool(provider_obj and provider_obj.intraday_capable)
+            intraday_capable_count = sum(1 for p, _ in self._providers if p.intraday_capable)
+            if is_this_intraday and intraday_capable_count < 2:
+                logger.warning(
+                    "%s ardisik %d TUR TAMAMEN guard'la dustu ama tek intraday-capable "
+                    "kaynak (mevcut: %d) -- cooldown UYGULANMADI (susturmak feed'i "
+                    "kendi kendine keserdi); guard bayat veriyi elemeye devam eder.",
+                    provider_name,
+                    streak,
+                    intraday_capable_count,
+                )
+                return
             self._guard_cooldown_until[provider_name] = now_m + settings.guard_cooldown_seconds
             # Cooldown aktive edilince sayac sifirlanir: aksi halde cooldown
             # bitiminde ilk kontrolde streak zaten esigin uzerinde kalir ve
@@ -289,16 +337,32 @@ class Aggregator:
                 continue
 
             cooldown_until = self._guard_cooldown_until.get(provider.name)
+            is_cooldown_probe = False
             if cooldown_until is not None:
-                if time.monotonic() < cooldown_until:
-                    logger.debug(
-                        "%s guard-cooldown'da (bitis=%.0f), atlaniyor",
-                        provider.name,
-                        cooldown_until,
-                    )
-                    continue
-                del self._guard_cooldown_until[provider.name]
-                metrics.PROVIDER_GUARD_COOLDOWN.labels(provider=provider.name).set(0)
+                if time.monotonic() >= cooldown_until:
+                    del self._guard_cooldown_until[provider.name]
+                    metrics.PROVIDER_GUARD_COOLDOWN.labels(provider=provider.name).set(0)
+                else:
+                    # HIGH-2(b): half-open -- cooldown suresi dolmadan, TUR
+                    # basina EN FAZLA 1 "prob" denemesine izin ver (circuit
+                    # breaker half-open deseniyle ayni ruh). Yalniz
+                    # yapilandirilmis TUR (count_toward_cooldown) prob yapar;
+                    # on-demand cagrilar cooldown'a mutlak saygi gosterir.
+                    probed = self._cooldown_probed_this_cycle
+                    if count_toward_cooldown and probed is not None and provider.name not in probed:
+                        probed.add(provider.name)
+                        is_cooldown_probe = True
+                        logger.debug(
+                            "%s cooldown'da ama bu tur icin 1 prob deneniyor (half-open)",
+                            provider.name,
+                        )
+                    else:
+                        logger.debug(
+                            "%s guard-cooldown'da (bitis=%.0f), atlaniyor",
+                            provider.name,
+                            cooldown_until,
+                        )
+                        continue
 
             ask = remaining if gapfill else symbols
             ask = [s for s in ask if symbol_circuit.allow(provider.name, s)]
@@ -401,6 +465,15 @@ class Aggregator:
             # end_cycle docstring'i).
             batch_fully_dropped[provider.name] = bool(guard_dropped) and not fetched
 
+            if is_cooldown_probe and not batch_fully_dropped[provider.name]:
+                # HIGH-2(b): prob BASARILI oldu -- cooldown turun sonunu
+                # beklemeden ANINDA kalkar, feed derhal iyilesir.
+                self._guard_cooldown_until.pop(provider.name, None)
+                metrics.PROVIDER_GUARD_COOLDOWN.labels(provider=provider.name).set(0)
+                logger.warning(
+                    "%s cooldown probu BASARILI -- cooldown aninda kaldirildi", provider.name
+                )
+
             if self._coverage_ok(fetched, ask):
                 breaker.record_success()
                 metrics.PROVIDER_UP.labels(provider=provider.name).set(1)
@@ -453,40 +526,52 @@ class Aggregator:
             if not gapfill and result:
                 break
 
-        # HIGH-3: fail-open emniyet supabi. `result` TAMAMEN bos VE en az IKI
-        # FARKLI kaynak fiilen sorgulanip TUMU tamamen guard'la dustuyse --
-        # yani BIRDEN FAZLA BAGIMSIZ kaynak AYNI ANDA basarisiz oldu -- bu
-        # tesadufi degildir, genellikle bir kaynak arizasi degil "piyasa-acik
+        # HIGH-3/HIGH-1(review-2): fail-open emniyet supabi. `result` TAMAMEN
+        # bos VE istenen batch TEMSILI BUYUKLUKTEYSE (`len(symbols) >=
+        # GUARD_FAIL_OPEN_MIN_SYMBOLS`) fail-open tetiklenir -- KAYNAK SAYISINA
+        # DEGIL boyuta bagli: TV cikti + isyatirim EOD-only oldugu icin seans
+        # icinde TEK intraday kaynak (yahoo_chart) kaldi; "en az 2 kaynak"
+        # sarti seans icinde YAPISAL OLARAK asla saglanamaz, fail-open'i
+        # olu birakirdi (bilinmeyen tatilde tum gun karanlik + sayac hic
+        # artmaz). Buyuk/cesitli bir batch'in TAMAMININ TEK bir kaynaktan bile
+        # ayni anda guard'a dusmesi tesadufi degildir -- "piyasa-acik
         # varsayimimiz (tatil listesi / last_trading_day?) yanlis" sinyalidir.
-        # TEK kaynak yapilandirilmissa (veya tek kaynak sorgulandiysa) bu ayrimi
-        # YAPAMAYIZ -- "yapisal olarak kisitli tek kaynak" ile "takvim hatasi"
-        # birbirinden ayirt edilemez, guvenli varsayilan cooldown yoluna
-        # dusmektir (asagida). Guard'i bu TUR icin fail-open yap: elimizdeki
-        # veriyi GEC (yok'tan iyi, ama acikca bayat isaretle), cooldown'a SOKMA
-        # -- bu batch'in sonucu cycle biriktiricisine hic MERGE EDILMEZ
-        # (asagida), sistemik sorun tek bir kaynaga atfedilmez.
+        # Kucuk batch'ler (on-demand tek-sembol dahil) esigin altinda kalip
+        # fail-open'i tetiklemez (LOW ihtimalli tekil "bugun islem gormedi"
+        # sembolleriyle karistirilmasin diye).
         if (
             not result
             and guard_dropped_candidates
-            and len(batch_fully_dropped) >= 2
-            and all(batch_fully_dropped.values())
+            and len(symbols) >= settings.guard_fail_open_min_symbols
         ):
             for s, q in guard_dropped_candidates.items():
                 q.stale = True
                 result[s] = q
             metrics.GUARD_FAIL_OPEN.inc()
             logger.critical(
-                "TUM kaynaklar TUM sembolleri (%d) guard'la dusurdu -- piyasa-acik "
-                "varsayimi (tatil listesi/last_trading_day?) hatali olabilir; guard "
-                "bu tur icin FAIL-OPEN yapildi (veri geciyor, cooldown tetiklenmedi).",
-                len(guard_dropped_candidates),
+                "%d sembolluk (esik %d) bir batch'te hicbir kaynak taze veri "
+                "uretemedi -- piyasa-acik varsayimi (tatil listesi/"
+                "last_trading_day?) hatali olabilir; guard bu batch icin "
+                "FAIL-OPEN yapildi (veri geciyor, cooldown tetiklenmedi).",
+                len(symbols),
+                settings.guard_fail_open_min_symbols,
             )
-            return result
-
-        # HIGH-1: batch'in guard-drop sonucunu cycle biriktiricisine merge et
-        # (yalniz count_toward_cooldown=True VE aktif bir cycle varsa; bkz.
-        # begin_cycle/end_cycle). Fail-open TETIKLENMEDIYSE buraya ulasilir.
-        if count_toward_cooldown and self._cycle_fully_dropped is not None:
+            # LOW-2: fail-open sistemik bir isarettir -- bu TURDEKI (aktif bir
+            # cycle varsa) BASKA batch'lerin "tam dustu" bilgisi de suphelidir;
+            # tum turun guard-drop degerlendirmesi end_cycle()'da VETO edilir.
+            if self._cycle_fully_dropped is not None:
+                self._cycle_fail_open_occurred = True
+            # LOW-1: eskiden burada erken `return result` vardi -- bu, AYNI
+            # batch'teki ILGISIZ (guard'la degil SANITY ile reddedilen)
+            # sembollerin kacis (escape) firsatini sessizce atliyordu (o an
+            # erisilemez bir kod yoluydu, ama artik fail-open koşulu
+            # gevsedigi icin CANLI bir bug olurdu). Artik asagi DEVAM eder --
+            # rejected/escape blogu normal calisir.
+        elif count_toward_cooldown and self._cycle_fully_dropped is not None:
+            # HIGH-1: batch'in guard-drop sonucunu cycle biriktiricisine merge
+            # et (yalniz count_toward_cooldown=True VE aktif bir cycle varsa;
+            # bkz. begin_cycle/end_cycle). Fail-open TETIKLENMEDIYSE buraya
+            # ulasilir.
             for provider_name, full_guard_drop in batch_fully_dropped.items():
                 prev = self._cycle_fully_dropped.get(provider_name, True)
                 self._cycle_fully_dropped[provider_name] = prev and full_guard_drop

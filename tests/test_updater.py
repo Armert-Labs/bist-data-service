@@ -4,6 +4,7 @@ import asyncio
 
 import app.symbols as sym_mod
 import app.updater as updater_mod
+import pytest
 from app import metrics
 from app.models import Quote
 from app.store import MemoryStore
@@ -70,6 +71,33 @@ async def test_update_once_wraps_batches_in_single_cooldown_cycle(monkeypatch, o
     assert calls["begin"] == 1  # TUM tur icin TEK begin_cycle
     assert calls["end"] == 1  # TUM tur icin TEK end_cycle
     assert calls["fetch"] == [True, True, True]  # her batch count_toward_cooldown=True gecti
+
+
+async def test_update_once_calls_end_cycle_even_when_cancelled_mid_batch(monkeypatch):
+    """MEDIUM-2 (review-2): `updater_cycle_timeout` asiminda `_run_cycle`
+    (bkz. `_run_cycle`) bu coroutine'e `CancelledError` enjekte eder --
+    try/finally OLMADAN `end_cycle()` HIC calismazdi (biriken guard-drop
+    bilgisi sessizce kaybolur, hicbir provider'in streak'i ne artar ne
+    sifirlanir). Artik iptal edilse bile `end_cycle()` HER ZAMAN cagrilir."""
+    store = MemoryStore()
+    await store.connect()
+
+    calls = {"end": 0}
+
+    def fake_end_cycle(now=None):
+        calls["end"] += 1
+
+    async def slow_fetch(symbols, previous=None, **kwargs):
+        await asyncio.sleep(10)  # asla zamaninda bitmez -- disaridan iptal edilir
+        return {}
+
+    monkeypatch.setattr(updater_mod.aggregator, "end_cycle", fake_end_cycle)
+    monkeypatch.setattr(updater_mod.aggregator, "fetch_quotes", slow_fetch)
+
+    up = BackgroundUpdater(symbols_list=["A", "B"], store=store)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(up._update_once(), timeout=0.05)
+    assert calls["end"] == 1  # iptal edilse bile end_cycle() cagrildi
 
 
 async def test_update_once_passes_previous_for_sanity(monkeypatch):

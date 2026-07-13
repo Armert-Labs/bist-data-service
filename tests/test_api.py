@@ -520,6 +520,33 @@ def test_quote_data_age_never_negative_for_future_exchange_time(monkeypatch):
         assert body["data_age_seconds"] >= 0
 
 
+def test_quote_preserves_fail_open_stale_flag_even_when_fresh_by_age(monkeypatch):
+    # MEDIUM-1 (review-2): aggregator'in HIGH-3 fail-open yolunda quote'a
+    # koydugu stale=True bayragi eskiden _with_live_state'in KOSULSUZ yeniden
+    # hesaplamasiyla EZILIYORDU (README/CHANGELOG "veri stale isaretiyle
+    # geciyor" diye vaat etmisti ama bu vaat tutulmuyordu). Yas-tabanli hesaba
+    # gore TAZE (updated_at=simdi) olsa bile provider/aggregator'in koydugu
+    # stale=True KORUNMALI.
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    monkeypatch.setattr("app.main.market_state", lambda: "OPEN")
+    store = get_store()
+    now = datetime.now(UTC)
+    store._quotes = {
+        # exchange_time YOK (isyatirim/tradingview gibi) -> reference=updated_at=simdi
+        # -> yas-tabanli hesap "stale=false" derdi. Ama fail-open stale=True koymus.
+        "THYAO": Quote(symbol="THYAO", price=100.0, updated_at=now, stale=True)
+    }
+    store._last_update = now
+    with TestClient(app) as c:
+        body = c.get("/quote/THYAO").json()
+        assert body["data_age_seconds"] < 1  # yas-tabanli hesaba gore TAZE
+        assert body["stale"] is True  # ama fail-open bayragi KORUNDU
+
+
 def test_all_quotes_report_data_age_seconds():
     _seed_store()
     with TestClient(app) as c:
