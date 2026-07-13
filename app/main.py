@@ -380,7 +380,22 @@ async def ready() -> dict:
         logger.exception("/ready store erisim hatasi")
         store_ok = False
         size, stale, oldest_age, fresh, last_age = 0, True, None, None, None
-    ready_flag = store_ok and size > 0 and not stale
+    # MEDIUM (review-5): acilis-toleransi penceresinde (bkz. store.is_stale)
+    # `stale` KOSULSUZ False doner -- "veri gecikmeli ama boru hatti saglikli"
+    # ile "boru hatti OLU (wedge/donmus updater)" ayirt edilemez, ikisi de
+    # `fresh_ratio=0` uretir. Servisin bilinen ANA arizasi (wedge/donmus
+    # updater -- py-spy watcher tam bunun icin var) bu pencerede 20 dk'ya
+    # kadar tespit edilemezdi. Ayirt edici: SAGLIKLI bir updater store'a HER
+    # `UPDATE_INTERVAL`de (vars. 60 sn) yazar; `last_update_age_seconds` bu
+    # sureyi (comert bir tampon = 2x) asarsa boru hatti GERCEKTEN olmustur --
+    # `stale`/grace penceresi ne derse desin. Yalniz market ACIKKEN uygulanir
+    # (kapaliyken updater bilerek calismaz -- UPDATE_WHEN_CLOSED=false varsayilan
+    # -- last_age dogal olarak buyur, bu bir ariza degildir).
+    market_open_now = is_market_open()
+    wedge_detected = (
+        market_open_now and last_age is not None and last_age > 2 * settings.update_interval
+    )
+    ready_flag = store_ok and size > 0 and not stale and not wedge_detected
 
     body = {
         "ready": ready_flag,

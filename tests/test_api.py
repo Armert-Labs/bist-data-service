@@ -240,6 +240,68 @@ def test_ready_not_ready_after_opening_grace_expires(monkeypatch, override_setti
         assert r.json()["detail"]["is_stale"] is True
 
 
+def test_ready_ok_when_healthy_updater_delayed_within_grace(monkeypatch, override_settings):
+    """MEDIUM (review-5) kilit testi (a): acilis toleransi penceresinde,
+    updater SAGLIKLI (her tur commit ediyor -- `last_update` TAZE) ama veri
+    gecikmeli (fail-open ile `stale=true`) olabilir -- bu durum wedge
+    DEGILDIR, `/ready` 200 KALMALI."""
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    override_settings(
+        staleness_min_fresh_pct=90.0, guard_open_grace_seconds=1200.0, update_interval=60.0
+    )
+    monkeypatch.setattr("app.main.is_market_open", lambda: True)
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 300.0)  # grace icinde
+    store = get_store()
+    now = datetime.now(UTC)
+    quotes = {
+        f"S{i:02d}": Quote(symbol=f"S{i:02d}", price=1.0, updated_at=now, stale=True)
+        for i in range(20)
+    }
+    store._quotes = quotes
+    store._last_update = now  # updater HALA yaziyor -- SAGLIKLI
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 200
+        assert r.json()["ready"] is True
+
+
+def test_ready_immediately_not_ready_when_updater_wedged_within_grace(
+    monkeypatch, override_settings
+):
+    """MEDIUM (review-5) kilit testi (b) — servisin bilinen ANA arizasi
+    (wedge/donmus updater) icin dedektor: acilis toleransi penceresi HALA
+    devam ederken (`is_stale()` tek basina 200 derdi) updater ÖLÜYSE (son
+    commit saatler once) `/ready` ANINDA 503 donmeli -- 20 dk'lik grace
+    penceresinin dolmasini BEKLEMEDEN. Ayirt edici: `last_update_age_seconds`
+    saglikli bir updater'in yazim araligini (2x tampon) asiyor."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Quote
+    from app.store import get_store
+
+    override_settings(
+        staleness_min_fresh_pct=90.0, guard_open_grace_seconds=1200.0, update_interval=60.0
+    )
+    monkeypatch.setattr("app.main.is_market_open", lambda: True)
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 300.0)  # grace icinde
+    store = get_store()
+    now = datetime.now(UTC)
+    dead_since = now - timedelta(hours=3)  # updater saatlerdir commit etmiyor -- OLU/wedge
+    quotes = {
+        f"S{i:02d}": Quote(symbol=f"S{i:02d}", price=1.0, updated_at=dead_since, stale=False)
+        for i in range(20)
+    }
+    store._quotes = quotes
+    store._last_update = dead_since
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 503
+
+
 def test_symbols_list():
     with TestClient(app) as c:
         body = c.get("/symbols").json()

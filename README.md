@@ -168,6 +168,25 @@ saatler önceki bir bar saniyelere küçültülüp operatörü yanıltmaz.
 > ve veri gecikmesinden [900 sn] kısa olduğu için **her işlem günü** açılıştan
 > ~5-16 dk sonrası `/ready` 503 + critical alarm üretiyordu; bu bir
 > **regresyondu**, artık düzeltildi.)
+>
+> **⚠️ Kısıt (LOW, review-5):** `GUARD_OPEN_GRACE_SECONDS` **kaynağın gerçek
+> veri gecikmesinden** (şu an ~900 sn / ~15 dk) **büyük olmalıdır** — aksi
+> hâlde her işlem günü açılışta yanlış CRITICAL + 503 **geri döner** (tam da
+> bu ayarın çözdüğü regresyon). Yahoo'nun gecikmesi bir gün 20 dk'yı aşarsa
+> bu değer orantılı büyütülmelidir.
+>
+> **Wedge/donmuş updater tespiti (MEDIUM, review-5):** açılış toleransı
+> penceresi `is_stale()`'i koşulsuz `False` yaptığı için "veri gecikmeli ama
+> boru hattı sağlıklı" ile "boru hattı **ÖLÜ**" (servisin bilinen ana
+> arızası — donmuş/wedge updater, `py-spy` watcher tam bunun için var) ayırt
+> edilemezdi; ikisi de bu pencerede `fresh_ratio=0` üretir. `/ready` artık
+> ayrıca `last_update_age_seconds`'a bakar: **market açıkken** bu değer
+> `2 × UPDATE_INTERVAL`'i (vars. 120 sn) aşarsa — sağlıklı bir updater her
+> `UPDATE_INTERVAL`'de (vars. 60 sn) store'a yazar — boru hattı gerçekten
+> ölmüştür ve `/ready` **anında 503** döner, açılış toleransı penceresinin
+> (20 dk) dolmasını beklemez. Market kapalıyken bu kontrol devre dışıdır
+> (updater bilerek çalışmaz, `UPDATE_WHEN_CLOSED=false` varsayılan — eski
+> veri bir arıza değildir).
 
 ### 🔓 Sanity-check kaçış yolu (bedelsiz/split sonrası kalıcı kilit kırılması)
 
@@ -208,6 +227,16 @@ bağlıyordu — ama seans içinde fiilen tek kaynak (`yahoo_chart`) kaldığı 
 bu şart YAPISAL OLARAK asla sağlanamaz, escape ölü kalır ve bedelsiz/split
 sonrası sembol **kalıcı olarak** sanity'de kilitlenirdi (restart bile
 kurtarmazdı — reddedilen quote store'a hiç yazılmaz).
+
+> **⚖️ Kabul edilmiş takas (bilinçli karar, review-5):** ısrar teyidi
+> mutlak bir garanti değildir — kaynak bir ticker'ı **kalıcı olarak** yanlış
+> bir satıra eşlerse (örn. THYAO'yu sürekli bir USD satırına yönlendiren bir
+> yapılandırma/entegrasyon hatası) bu hatalı fiyat da 3 ardışık tur boyunca
+> **ısrar eder** ve escape ile kabul edilir. Tek kaynaklı bir dünyada
+> kalıcı-yanlış-eşleme ile gerçek-kurumsal-işlem **formen ayırt edilemez** —
+> ikisi de "aynı kaynak, aynı fiyatı ısrarla tekrarlıyor" imzasını taşır.
+> Bu, Faz-2'de ikinci bağımsız bir kaynak (çoklu-kaynak uzlaşısı, `reason=
+> corroboration`) gelene kadar açık kalan, bilinçli kabul edilmiş bir risktir.
 
 ### ⚖️ TradingView'in varsayılan zincirden çıkarılması (hukuki karar) + bilinen açık maddeler
 
@@ -510,6 +539,11 @@ curl http://localhost:8000/ready
 
 > **Provider durumu ters okunur:** `"closed"` = circuit **kapalı** = **SAĞLIKLI**.
 > `"open"` = circuit açık = kaynak geçici devre dışı. `"half_open"` = toparlanıyor.
+
+> **`last_update_age_seconds` wedge dedektörüdür (bkz. "Wedge/donmuş updater
+> tespiti" yukarıda):** market açıkken bu değer `2 × UPDATE_INTERVAL`'i
+> aşarsa `ready=false` döner — `is_stale`'in açılış toleransı yüzünden
+> `false` görünse bile. Donmuş/wedge updater'ı ayırt eden alan budur.
 
 #### `GET /health` — liveness (auth'suz)
 
