@@ -20,7 +20,12 @@ PROVIDER_UP = Gauge("bist_provider_up", "Kaynak saglikli mi (1/0)", ["provider"]
 
 SANITY_REJECTS = Counter("bist_sanity_rejects_total", "Sanity-check ile elenen absurt fiyatlar")
 SANITY_ESCAPES = Counter(
-    "bist_sanity_escapes_total", "Kacis penceresi sonrasi kabul edilen sanity redleri"
+    "bist_sanity_escapes_total",
+    "Kacis mekanizmasi ile kabul edilen sanity redleri (reason: consistency="
+    "kaynagin kendi previous_close'u ile tutarlilik, persistence=ayni kaynagin "
+    "N ardisik turda israrla ayni fiyati tekrarlamasi, corroboration=coklu "
+    "bagimsiz kaynak uzlasisi)",
+    ["provider", "reason"],
 )
 WRITE_VALIDATE_REJECTS = Counter(
     "bist_write_validate_rejects_total", "Capraz-kaynak yazma dogrulamasinda elenen fiyatlar"

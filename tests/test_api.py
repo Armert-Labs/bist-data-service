@@ -113,6 +113,75 @@ def test_ready_ok_with_fresh_data():
         assert r.json()["ready"] is True
 
 
+def test_ready_not_ready_when_all_quotes_are_fail_open_stale(monkeypatch, override_settings):
+    """HIGH-1 uctan uca kaniti: aggregator.end_cycle() fail-open sirasinda
+    stale=True + updated_at=simdi ile commit ettigi quote'lar -- `updated_at`
+    cache YAZIM anini gosterdigi icin (GERCEK veri yasini degil) yalniz ona
+    bakan bir /ready HER SEYI "saglikli" sanip 200 donerdi, hicbir alarm
+    calmazdi. Artik store.is_stale() bu quote'lari TAZE SAYMIYOR -- /ready
+    dogru sekilde 503 doner."""
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    override_settings(staleness_min_fresh_pct=90.0)
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 3600.0)
+    store = get_store()
+    now = datetime.now(UTC)
+    quotes = {
+        f"S{i:02d}": Quote(symbol=f"S{i:02d}", price=1.0, updated_at=now, stale=True)
+        for i in range(20)
+    }
+    store._quotes = quotes
+    store._last_update = now
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 503
+        body = r.json()["detail"]
+        assert body["is_stale"] is True
+        assert body["fresh_pct"] == 0.0
+
+
+def test_ready_oldest_quote_age_reflects_real_bar_age_after_fail_open(
+    monkeypatch, override_settings
+):
+    """HIGH-1 kardes bulgu: `store.oldest_update_age()` de yalniz `updated_at`'e
+    (cache YAZIM ani) bakiyordu -- fail-open turu sonrasi `/ready`'nin
+    `oldest_quote_age_seconds` alani (ve `bist_oldest_quote_age_seconds`
+    metrigi) GERCEK veri yasini (saatler once bir bar) degil cache-yazim
+    yasini (saniyeler) gosterip operatoru yaniltirdi. Artik stale=True
+    quote'larda yas exchange_time'dan (GERCEK veri zamanindan) hesaplanir."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Quote
+    from app.store import get_store
+
+    override_settings(staleness_min_fresh_pct=90.0)
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 3600.0)
+    store = get_store()
+    now = datetime.now(UTC)
+    yesterday_bar = now - timedelta(hours=20)
+    quotes = {
+        f"S{i:02d}": Quote(
+            symbol=f"S{i:02d}",
+            price=1.0,
+            updated_at=now,  # cache YAZIM ani -- "simdi"
+            exchange_time=yesterday_bar,  # GERCEK veri ani -- 20 saat once
+            stale=True,
+        )
+        for i in range(20)
+    }
+    store._quotes = quotes
+    store._last_update = now
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 503
+        body = r.json()["detail"]
+        # cache-yazim yasina (saniyeler) gore DEGIL, gercek bar yasina (saatler) gore.
+        assert body["oldest_quote_age_seconds"] > 3600 * 15
+
+
 def test_symbols_list():
     with TestClient(app) as c:
         body = c.get("/symbols").json()
@@ -545,6 +614,58 @@ def test_quote_preserves_fail_open_stale_flag_even_when_fresh_by_age(monkeypatch
         body = c.get("/quote/THYAO").json()
         assert body["data_age_seconds"] < 1  # yas-tabanli hesaba gore TAZE
         assert body["stale"] is True  # ama fail-open bayragi KORUNDU
+
+
+def test_quote_stale_when_bar_time_is_yesterday_even_if_cache_fresh(monkeypatch):
+    """HIGH-2: guard yalniz FETCH aninda (aggregator.fetch_quotes) calisir;
+    okuma aninda bir daha bakilmazsa acilisin ilk dakikalarinda (orn. 09:56
+    warm-up piyasa kapaliyken dogru gecen, ama 10:00:30 okuma piyasa acikken
+    yapilan) bir Cuma kapanisi cache YAZIM yasina (data_age_seconds) gore
+    "taze" servis edilebilirdi. _with_live_state artik bar_time'i (varsa)
+    okuma aninda da kontrol eder. `is_stale_bar`'in KENDI gun/tatil mantigi
+    test_market.py'de kapsanir -- burada yalniz _with_live_state'in bu
+    fonksiyonun sonucunu dogru KABLOLADIGI (saatten bagimsiz, deterministik)
+    dogrulanir."""
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    monkeypatch.setattr("app.main.market_state", lambda: "OPEN")
+    monkeypatch.setattr("app.main.is_stale_bar", lambda bar_or_exchange_time, now: True)
+    store = get_store()
+    now = datetime.now(UTC)
+    store._quotes = {
+        # exchange_time YOK (isyatirim gibi) -> yas-tabanli hesap updated_at'e
+        # (simdi) bakar, "taze" derdi. bar_time'in GERCEK degeri onemsiz --
+        # is_stale_bar sabit True donecek sekilde mock'landi.
+        "THYAO": Quote(symbol="THYAO", price=100.0, updated_at=now, bar_time=now)
+    }
+    store._last_update = now
+    with TestClient(app) as c:
+        body = c.get("/quote/THYAO").json()
+        assert body["data_age_seconds"] < 5  # cache YAZIM yasina gore "taze"
+        assert body["stale"] is True  # ama bar_time'a gore GERCEKTEN bayat
+
+
+def test_quote_not_stale_when_bar_time_is_current(monkeypatch):
+    """HIGH-2 regresyon kilidi: bar_time GUNCELSE (is_stale_bar=False) ve yas-
+    tabanli hesap da taze diyorsa stale=False kalmali -- yeni kontrol yanlis
+    pozitif uretmemeli."""
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    monkeypatch.setattr("app.main.market_state", lambda: "OPEN")
+    monkeypatch.setattr("app.main.is_stale_bar", lambda bar_or_exchange_time, now: False)
+    store = get_store()
+    now = datetime.now(UTC)
+    store._quotes = {"THYAO": Quote(symbol="THYAO", price=100.0, updated_at=now, bar_time=now)}
+    store._last_update = now
+    with TestClient(app) as c:
+        body = c.get("/quote/THYAO").json()
+        assert body["stale"] is False
 
 
 def test_all_quotes_report_data_age_seconds():

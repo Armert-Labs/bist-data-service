@@ -44,7 +44,7 @@ from .auth import registry
 from .config import settings, validate_production
 from .deps import fetch_semaphore, limiter, require_api_key
 from .logging_config import set_request_id, setup_logging
-from .market import is_market_open, market_state
+from .market import is_market_open, is_stale_bar, market_state
 from .models import HistoryResponse, Quote
 from .pipeline import (
     compare_against_references,
@@ -97,20 +97,29 @@ def _with_live_state(q: Quote, state: str) -> Quote:
     hesaplar (exchange_time varsa oradan, yoksa updated_at'ten). Store objesi
     mutasyona ugratilmaz (MemoryStore ayni nesneyi paylasir); bu alanlar her
     okumada degistigi icin artik HER zaman bir kopya doner."""
+    now_moment = datetime.now(UTC)
     reference = q.exchange_time or q.updated_at
     # MEDIUM-2: saat kaymasi / klemp bosluğu gibi uc durumlarda referans
     # "simdi"den ileride kalabilir (orn. isyatirim'in kapanis-zamani tahmini);
     # data_age_seconds negatif GORUNMEMELI.
-    age = max((datetime.now(UTC) - reference).total_seconds(), 0.0) if reference else None
+    age = max((now_moment - reference).total_seconds(), 0.0) if reference else None
     age_based_stale = age is not None and state == "OPEN" and age > settings.staleness_seconds
-    # MEDIUM-1 (review-2): aggregator'in HIGH-3 fail-open yolunda quote'a
-    # koydugu `stale=True` (bkz. aggregator.fetch_quotes) buraya kadar
-    # ULAŞMIYORDU -- asagidaki model_copy KOŞULSUZ ezip yeniden hesapliyordu
-    # (ustelik yalniz market OPEN'ken True olabiliyordu). Fail-open ozellikle
-    # "veri stale isaretiyle geciyor" diye belgelenmisti (README/CHANGELOG) --
-    # bu vaat tutulmuyordu. Artik provider/aggregator'in koydugu bayrak
-    # KORUNUR (OR'lanir), yas-tabanli hesap yalniz EK bir sebep olarak calisir.
-    stale = q.stale or age_based_stale
+    # HIGH-2: yas-tabanli hesap (yukarida) exchange_time/updated_at'e bakar --
+    # isyatirim/tradingview gibi exchange_time HIC doldurmayan kaynaklarda
+    # reference=updated_at (cache YAZIM ani) olur, bu GERCEK veri (bar_time)
+    # yasini yansitmaz. Guard yalniz FETCH aninda (aggregator.fetch_quotes)
+    # calisir; okuma aninda bir daha bakilmazsa acilisin ilk dakikalarinda
+    # (warm-up piyasa kapaliyken doğru gecen, ama okuma piyasa acilinca
+    # yapilan) bir Cuma kapanisi "taze" servis edilebilirdi (bkz. review).
+    # Okuma da bar_time'i (varsa, yoksa exchange_time'i) yeniden kontrol eder.
+    bar_stale = is_stale_bar(q.bar_time or q.exchange_time, now_moment)
+    # MEDIUM-1 (review-2): aggregator'in fail-open yolunda quote'a koydugu
+    # `stale=True` (bkz. aggregator.end_cycle) buraya kadar ULAŞMIYORDU --
+    # asagidaki model_copy KOŞULSUZ ezip yeniden hesapliyordu. Fail-open
+    # ozellikle "veri stale isaretiyle geciyor" diye belgelenmisti
+    # (README/CHANGELOG) -- bu vaat tutulmuyordu. Artik provider/aggregator'in
+    # koydugu bayrak KORUNUR (OR'lanir), diger iki hesap EK birer sebep olarak calisir.
+    stale = q.stale or age_based_stale or bar_stale
     return q.model_copy(
         update={
             "market_state": state,

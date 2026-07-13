@@ -105,7 +105,10 @@ services:
     restart: unless-stopped
     privileged: true
     ports:
-      - "8081:8080"
+      # MEDIUM-2 (review): "8081:8080" 0.0.0.0'a baglanir -- 8001 icin daha
+      # once duzeltilen ayni public-expose acigi (ustelik privileged:true +
+      # /:/rootfs:ro + auth'suz). Yalniz VM130'un kendi internal IP'sine baglan.
+      - "10.10.10.130:8081:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro

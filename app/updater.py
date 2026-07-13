@@ -17,6 +17,7 @@ from . import symbols as sym
 from .aggregator import aggregator
 from .config import settings
 from .market import is_market_open, market_state
+from .models import Quote
 from .pipeline import commit_quotes, run_drift_monitor
 from .store import Store, get_store
 
@@ -58,6 +59,7 @@ class BackgroundUpdater:
         # False kalir -- bugun islem gormemis tek bir hissenin tekrarli
         # on-demand sorgusu bir kaynagi TUM semboller icin cooldown'a sokmasin).
         aggregator.begin_cycle()
+        fail_open_quotes: dict[str, Quote] = {}
         try:
             for start in range(0, len(self._symbols), batch_size):
                 if self._stop.is_set():
@@ -80,7 +82,18 @@ class BackgroundUpdater:
             # try/finally OLMADAN end_cycle() hic calismaz, biriken guard-drop
             # bilgisi sessizce kaybolur (ne streak artar ne sifirlanir). Artik
             # iptal edilse bile TUR sonu degerlendirmesi HER ZAMAN calisir.
-            aggregator.end_cycle()
+            # HIGH-3: end_cycle() artik TUR-bazli fail-open kararinin
+            # SONUCUNU (varsa) dondurur -- ilgili batch'ler zaten bos donmustu
+            # (guard onlari dusurmustu), bu yuzden asagida AYRICA commit edilir.
+            fail_open_quotes = aggregator.end_cycle()
+
+        if fail_open_quotes:
+            await commit_quotes(self._store, fail_open_quotes, market=state)
+            for s, q in fail_open_quotes.items():
+                if q.price is not None:
+                    previous[s] = q.price
+                source_counts[q.source] += 1
+            total += len(fail_open_quotes)
 
         duration = time.monotonic() - started
         metrics.UPDATE_DURATION.observe(duration)

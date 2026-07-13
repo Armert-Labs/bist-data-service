@@ -73,6 +73,43 @@ async def test_update_once_wraps_batches_in_single_cooldown_cycle(monkeypatch, o
     assert calls["fetch"] == [True, True, True]  # her batch count_toward_cooldown=True gecti
 
 
+async def test_update_once_commits_end_cycle_fail_open_result(monkeypatch):
+    """HIGH-3 uctan uca kablolama kaniti: end_cycle() artik (TUR-bazli
+    fail-open kararinin sonucu olan) bir dict DONDURUR -- ilgili batch'ler
+    zaten bos donmustu (guard onlari dusurmustu); _update_once bu sonucu
+    AYRICA commit etmeli, yoksa fail-open'in kurtardigi veri store'a hic
+    yazilmaz (Aggregator'in end_cycle kararinin kendisi test_aggregator.py'de
+    test edilir, burada yalniz updater'a dogru KABLOLANDIGI dogrulanir)."""
+    store = MemoryStore()
+    await store.connect()
+
+    async def fake_fetch(symbols, previous=None, **kwargs):
+        return {}  # her batch guard'la dustu -- bu tur icin normal donus bos
+
+    fail_open_quotes = {
+        "THYAO": Quote(symbol="THYAO", price=344.5, source="yahoo_chart", stale=True),
+        "GARAN": Quote(symbol="GARAN", price=50.0, source="yahoo_chart", stale=True),
+    }
+
+    def fake_end_cycle(now=None):
+        return fail_open_quotes
+
+    async def no_sleep(*a, **k):
+        return None
+
+    monkeypatch.setattr(updater_mod.aggregator, "fetch_quotes", fake_fetch)
+    monkeypatch.setattr(updater_mod.aggregator, "end_cycle", fake_end_cycle)
+    monkeypatch.setattr(updater_mod.asyncio, "sleep", no_sleep)
+
+    up = BackgroundUpdater(symbols_list=["THYAO", "GARAN"], store=store)
+    count = await up._update_once()
+
+    assert count == 2
+    got = await store.get_quote("THYAO")
+    assert got is not None and got.price == 344.5 and got.stale is True
+    assert metrics.QUOTES_BY_SOURCE.labels(source="yahoo_chart")._value.get() == 2
+
+
 async def test_update_once_calls_end_cycle_even_when_cancelled_mid_batch(monkeypatch):
     """MEDIUM-2 (review-2): `updater_cycle_timeout` asiminda `_run_cycle`
     (bkz. `_run_cycle`) bu coroutine'e `CancelledError` enjekte eder --

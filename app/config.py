@@ -151,15 +151,20 @@ class Settings:
     guard_drop_streak_max_age_seconds: float = field(
         default_factory=lambda: _get_float("GUARD_DROP_STREAK_MAX_AGE_SECONDS", 900.0)
     )
-    # HIGH-1 (review-2): fail-open esigi KAYNAK SAYISINA degil BATCH
-    # BUYUKLUGUNE bagli -- TradingView cikarildi + Is Yatirim EOD-only
-    # (intraday_capable=False) oldugu icin seans icinde TEK intraday kaynak
-    # kaldi; "en az 2 kaynak" sarti bu dunyada asla saglanamaz, fail-open'i
-    # olu birakirdi. Bir batch'in TAMAMI (>= bu esik) TEK bir kaynaktan bile
-    # ayni anda guard'a duserse (buyuk/cesitli bir sembol kumesinin HEPSİ)
-    # bu tesadufi degildir -- sistemik bir isarettir. On-demand tek-sembol
-    # istekler (len(symbols)=1) esigin cok altinda kalir, fail-open'i hic
-    # tetiklemez.
+    # HIGH-3 (review-3): esik artik BATCH degil TUR (cycle) bazinda
+    # degerlendirilir -- eskiden batch-bazli degerlendirme, watchlist/batch_size
+    # boluminden kalan KUCUK son batch'in (orn. 525 sembol / 40'lik batch =
+    # son batch 5 sembol) hicbir zaman bu esigi asamamasi yuzunden fail-open'i
+    # o kalinti semboller icin YAPISAL OLARAK olu birakiyordu (korunma
+    # `len(watchlist) % BATCH_SIZE`'a bagliydi -- deterministik olmayan bir
+    # emniyet). Artik tum TURDA (begin_cycle/end_cycle arasinda biriken TUM
+    # batch'ler) HICBIR sembol taze quote almadiysa VE cikarilan guard-dusmus
+    # aday sayisi bu esigi asarsa fail-open tetiklenir -- "kaynak sayisina"
+    # DEGIL (tek intraday kaynakli dunyada asla saglanamaz) "batch buyuklugune"
+    # de DEGIL, CYCLE'in TAMAMINA bagli bir esiktir. Yalniz updater'in
+    # yapilandirilmis TUR dongusu (count_toward_cooldown=True + begin_cycle/
+    # end_cycle aktif) bu degerlendirmeye girer -- on-demand istekler (HIGH-3b)
+    # asla fail-open tetiklemez (cycle state'i hic mevcut degildir).
     guard_fail_open_min_symbols: int = field(
         default_factory=lambda: _get_int("GUARD_FAIL_OPEN_MIN_SYMBOLS", 20)
     )
@@ -259,6 +264,21 @@ class Settings:
     # kirar (onceki fiyat yalnizca kabul edilen quote ile guncellenir). 0 = kapali.
     sanity_reject_escape_seconds: float = field(
         default_factory=lambda: _get_float("SANITY_REJECT_ESCAPE_SECONDS", 900.0)
+    )
+    # CRITICAL-1: coklu-kaynak uzlasisi (yukarisi) TEK intraday kaynakli
+    # dunyada (bkz. PROVIDERS yorumu) YAPISAL OLARAK asla tetiklenemez --
+    # `candidates` her zaman <2 kalir, escape olu kalirdi (bedelsiz/split
+    # sonrasi sembol KALICI olarak sanity'de kilitlenirdi). Israr teyidi:
+    # AYNI kaynak, AYNI (asagidaki tolerans icindeki) fiyati N ARDISIK TURDA
+    # tekrarlarsa kabul edilir -- gecici tick hatasi israr etmez, kurumsal
+    # islem (bedelsiz/split) eder. 0 = kapali.
+    sanity_escape_persist_rounds: int = field(
+        default_factory=lambda: _get_int("SANITY_ESCAPE_PERSIST_ROUNDS", 3)
+    )
+    # Israr teyidinde "ayni fiyat" sayilmasi icin ardisik turlar arasi izin
+    # verilen maksimum sapma (%).
+    sanity_escape_persist_tolerance_pct: float = field(
+        default_factory=lambda: _get_float("SANITY_ESCAPE_PERSIST_TOLERANCE_PCT", 1.0)
     )
 
     # --- Bayatlik (staleness) ---

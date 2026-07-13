@@ -314,6 +314,73 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
   streak yine birikebiliyordu) — artık fail-open'ın olduğu tur, TÜM
   provider'lar için veto edilir (streak'e hiçbir şey yazılmaz).
 
+### Düzeltildi (devam 3) — birleşik iki-review turu: 1 CRITICAL + 3 HIGH + 3 MEDIUM + LOW
+- **CRITICAL-1 (sanity-escape tek-kaynak dünyasında yapısal olarak ölüydü):**
+  `_try_escape` `len(candidates) >= 2` şartına bağlıydı — seans içinde TEK
+  intraday kaynak sorgulandığı için bu şart asla sağlanamaz, escape ölü
+  kalırdı. Bedelsiz/split sonrası bir sembol **kalıcı olarak** sanity'de
+  kilitlenirdi (reddedilen quote store'a hiç yazılmadığı için restart bile
+  kurtarmazdı). İki bağımsız kaçış yolu eklendi (bkz. README "Sanity-check
+  kaçış yolları"): **(a)** kaynağın kendi `previous_close`'u yeni fiyatla VE
+  bizim bildiğimiz önceki fiyattan farklılığıyla tutarlıysa (`reason=
+  consistency`) tek turda kabul; **(b)** aynı kaynak aynı aykırı fiyatı
+  `SANITY_ESCAPE_PERSIST_ROUNDS` (vars. 3) ardışık TURDA tekrarlarsa
+  (`reason=persistence`) kabul. Eski çoklu-kaynak uzlaşısı (`reason=
+  corroboration`) Faz-2 için korunur. `bist_sanity_escapes_total` artık
+  `{provider,reason}` etiketli + escape kabulünde CRITICAL log.
+- **HIGH-1 (fail-open bayatlık dedektörünü körleştiriyordu):** `store.
+  fresh_ratio()`/`is_stale()` yalnız `updated_at`'e (cache YAZIM anı, GERÇEK
+  veri yaşı değil) bakıyordu — fail-open `stale=True` koysa bile `/ready`
+  "sağlıklı" görünüyor, `BistDataStale`/`BistApiDegraded` gibi hiçbir alarm
+  çalmıyordu. `stale=True` quote artık TAZE SAYILMIYOR. Ayrıca: bir provider'ın
+  `ask`'inin TAMAMI guard'la (bayat-bar/damgasız) düşerse gapfill dalında artık
+  `breaker.record_success()` YAZILMIYOR (breaker/`bist_provider_up` durumu
+  değiştirilmiyor) — kitlesel guard-düşmesi provider'ı yanlışlıkla "sağlıklı"
+  göstermesin diye. Aynı körlüğün kardeşi: `store.oldest_update_age()` (ve
+  `bist_oldest_quote_age_seconds` metriği, `/ready`'nin
+  `oldest_quote_age_seconds` alanı) de yalnız `updated_at`'e bakıyordu —
+  `stale=True` quote'larda artık yaş GERÇEK veri zamanından (`exchange_time or
+  bar_time or updated_at` önceliğiyle) hesaplanıyor; fail-open sırasında
+  saatler önceki bir bar artık saniyelere küçültülmüyor.
+- **HIGH-2 (okuma yolu `bar_time`'a hiç bakmıyordu):** guard yalnız FETCH
+  anında çalışıyordu; `main.py::_with_live_state` okuma anında yalnız
+  `exchange_time`/`updated_at` yaşına bakıyordu — açılışın ilk dakikalarında
+  (warm-up piyasa kapalıyken doğru geçen, ama okuma piyasa açılınca yapılan)
+  bir Cuma kapanışı "taze" servis edilebilirdi. Artık okuma da `bar_time`'ı
+  (varsa, yoksa `exchange_time`'ı) `is_stale_bar` ile yeniden kontrol eder.
+- **HIGH-3 (fail-open BATCH değil TUR düzeyinde değerlendirilmeliydi):** eski
+  tasarım `watchlist/BATCH_SIZE` bölümünden kalan küçük son batch'i (örn. 525
+  sembol / 40'lık batch = kalan 5) sistemik bir kesinti sırasında bile hiçbir
+  zaman eşiği aşamayacağı için korumasız bırakıyordu (korunma
+  `len(watchlist) % BATCH_SIZE`'a bağlıydı — deterministik olmayan bir
+  emniyet); ayrıca `count_toward_cooldown`'a bakmadığı için on-demand
+  `/quotes?symbols=` istekleri de (≥eşik cache-miss sembolle) tetikleyebiliyor,
+  `bist_guard_fail_open_total` sayacını kirletebiliyordu. Karar artık
+  `end_cycle()`'da, TUR düzeyinde verilir: "bu turda TÜM watchlist sıfır taze
+  quote üretti mi?" — evetse, TURUN TOPLAMINDA biriken guard-düşmüş adaylar
+  (küçük kalıntı batch dahil) `stale=true` ile kurtarılır. Yalnızca updater'ın
+  yapılandırılmış döngüsü (`begin_cycle`/`end_cycle`) bu değerlendirmeye girer
+  — on-demand yol yapısal olarak asla giremez.
+- **MEDIUM-1 (fail-open sanity-check'i atlıyordu):** guard'ın düşürdüğü aday
+  doğrudan commit ediliyordu — absürt bir fiyat + bayat damga birlikte
+  `previous`'i kalıcı olarak zehirleyebilirdi (CRITICAL-1 ile birleşince zehir
+  KALICI olurdu). Fail-open adayları artık `end_cycle()`'da sanity-check'ten
+  de geçirilir.
+- **MEDIUM-2 (cAdvisor `0.0.0.0:8081`'de):** 8001 için daha önce düzeltilen
+  aynı public-expose açığı (üstelik `privileged: true` + `/:/rootfs:ro` +
+  auth'suz) — `docker-compose.yml` artık yalnız VM130'un internal IP'sine
+  (`10.10.10.130:8081:8080`) bağlanıyor.
+- **MEDIUM-3 (TradingView hâlâ sembol evrenini belirliyor — kabul edilen
+  kalıntı risk):** `SYMBOL_UNIVERSE_REFRESH_ENABLED` **PATRON KARARIYLA
+  KALDI** (ücretsiz, çalışıyor) — kod değişikliği yok, yalnızca README/
+  `.env.example`'a açıkça belgelendi: fiyat zinciri TradingView'den tamamen
+  arındırıldı, sembol evreni (dizin) hâlâ TradingView'den gelir.
+- **LOW (test yanılsaması):** eski escape testleri (`_two_agreeing_providers`)
+  yalnızca artık üretimde var olmayan iki-intraday-kaynak dünyasını
+  kapsıyordu; gerçek üretim zinciriyle (tek `yahoo_chart`, gerçek
+  `IsYatirimProvider`) escape + fail-open + `/ready`/`store.is_stale()`/metrik
+  entegrasyon testleri eklendi.
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi
