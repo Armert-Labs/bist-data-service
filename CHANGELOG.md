@@ -132,6 +132,60 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
     (tzinfo'suz) `exchange_time`'ı artık sunucunun yerel saat diliminden
     bağımsız her zaman UTC sayıyor.
 
+- **Veri-doğruluk hardening — çapraz-göz bulgusu turu (3 HIGH + 4 MEDIUM + 3 LOW):**
+  - **HIGH-4 (`bar_time`/`exchange_time` ayrımı):** `exchange_time` iki farklı
+    anlamda kullanılıyordu — "yaş hesabı için gerçek işlem anı" ve "bayat-bar
+    guard'ı için barın ait olduğu gün" — bu ikisi TradingView için ÇELİŞİYORDU
+    (`time` kolonu bar-açılış anıdır, sabah 10:00'da set olur ve gün boyu
+    değişmez; bunu `exchange_time`'a koymak öğleden sonra her TV quote'unu
+    yanlışlıkla `stale:true` gösterirdi). `Quote`'a ayrı bir `bar_time` alanı
+    eklendi: `exchange_time` SADECE `data_age_seconds` hesabında kullanılır;
+    `bar_time` bayat-bar guard'ında (`is_stale_bar`) kullanılır. TradingView ve
+    İş Yatırım artık `exchange_time`'ı hiç doldurmaz (yalnızca `bar_time`);
+    `yahoo` (yfinance) da DataFrame index'inden `bar_time` türetir;
+    `yahoo_chart` için `regularMarketTime` ikisi için de aynı değerdir (bu
+    kaynak gerçek işlem anını sağlar). **Kritik tamamlayıcı düzeltme:**
+    `aggregator.py`'nin bayat-bar guard'ı (Block-1) ve damgasız-kaynak
+    guard'ı (Block-2) ile `pipeline.py`'nin `_pick_reference`'ı bu ayrımdan
+    SONRA da hâlâ yalnızca `exchange_time`'a bakıyordu — TradingView/İş
+    Yatırım artık `exchange_time`'ı hiç doldurmadığı için Block-1 bu iki
+    kaynak için kalıcı olarak devre dışı kalıyor, Block-2 ise TERSİNE aşırı
+    agresifleşip bar_time taze olsa bile seans boyunca HER TURDA quote'larını
+    düşürüyordu (feed seans içinde fiilen tek kaynağa — `yahoo_chart` —
+    inerdi, bu da yeni eklenen MEDIUM-7 cooldown'unu kalıcı biçimde tetikler
+    ve yapısal bir arızayı sonsuza kadar sürdürürdü). Üç konum da artık
+    `bar_time or exchange_time` (guard) / her iki alanın da `None` olması
+    (damgasız-kaynak guard'ı) sözleşmesini kullanır.
+  - **MEDIUM-5 (referans yolu asimetrisi):** Aggregator seans içinde hiçbir
+    zaman damgası (`bar_time` VE `exchange_time`) taşımayan bir quote'u
+    güvenilmez sayıp düşürüyordu, ama doğrulama referans seçicisi
+    (`_pick_reference`) aynı quote'u referans olarak KABUL edebiliyordu
+    (asimetri — feed'in attığı veri arka kapıdan doğrulamaya geri girebilirdi).
+    `_pick_reference` artık seans içinde damgasız adayları aynı şekilde
+    reddeder (`bist_validate_no_reference_total{reason="no_timestamp"}`).
+  - **MEDIUM-6 (kapalı-piyasa guard körlüğü):** Bayat-bar guard'ı yalnızca
+    "seans açıkken bugüne ait değilse" kuralıyla çalışıyordu; piyasa kapalıyken
+    devre dışıydı — donmuş/eski bir kaynak (örn. 2 hafta önceki bir bar) hiç
+    yakalanmadan "kapanış fiyatı" gibi geçebilirdi. `market.last_trading_day()`
+    eklendi; `is_stale_bar` artık kapalı piyasada da barın gününü SON İŞLEM
+    GÜNÜYLE (hafta sonu/tatil dahil, geriye yuvarlanmış) karşılaştırır.
+  - **MEDIUM-7 (guard-drop provider-seviyesi cooldown/backpressure):**
+    Guard'ın düşürdüğü semboller `symbol_circuit`'e hata yazmadığı için
+    (MEDIUM-3, bilinçli) yapısal olarak seans içinde hiç taze veri
+    üretemeyen bir kaynağın üzerinde HİÇBİR fren kalmamıştı — her turda
+    (sembol başına 1 istek) sonsuza kadar sorgulanmaya devam edebilirdi. Bir
+    kaynak ardışık `GUARD_COOLDOWN_FAIL_THRESHOLD` (varsayılan 3) turda
+    isteğinin TAMAMINI guard'a kaybederse `GUARD_COOLDOWN_SECONDS` (varsayılan
+    1800sn) süreyle provider-seviyesinde cooldown'a alınır
+    (`bist_provider_guard_cooldown{provider}` gauge); en az bir quote
+    geçtiğinde ardışık sayaç sıfırlanır, cooldown bitince yeniden denenir.
+  - **LOW-3 (`/validate` sayaç şişmesi):** `bist_validate_no_reference_total`
+    `_pick_reference` içinde koşulsuz artıyordu; insan-teşhis (`/validate`,
+    operatör poll'u) endpoint'i aynı çekirdeği kullandığı için her manuel
+    sorgu, arka plan drift-monitörünün gerçek "referans bulunamadı" oranını
+    bozuyordu. `_pick_reference`/`compare_against_references`'a
+    `record_metrics` parametresi eklendi; `/validate` artık `False` geçer.
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi

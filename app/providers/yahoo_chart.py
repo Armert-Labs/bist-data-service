@@ -72,6 +72,15 @@ class YahooChartProvider(Provider):
             change = round(price - prev, 4)
             change_percent = round((price - prev) / prev * 100.0, 2)
 
+        # HIGH-4: regularMarketTime bu kaynak icin HEM gercek islem-ani (yas
+        # hesabi -> exchange_time) HEM bar_time'dir (guard -> bar_time) --
+        # TradingView'in aksine burada ikisi ayni deger (bkz. tradingview.py).
+        market_time = (
+            datetime.fromtimestamp(meta["regularMarketTime"], tz=UTC)
+            if meta.get("regularMarketTime")
+            else None
+        )
+
         return Quote(
             symbol=bist,
             price=price,
@@ -88,9 +97,8 @@ class YahooChartProvider(Provider):
             source="yahoo_chart",
             delayed=True,
             updated_at=datetime.now(UTC),
-            exchange_time=datetime.fromtimestamp(meta["regularMarketTime"], tz=UTC)
-            if meta.get("regularMarketTime")
-            else None,
+            exchange_time=market_time,
+            bar_time=market_time,
         )
 
     async def fetch_quotes(self, symbols: list[str]) -> dict[str, Quote]:

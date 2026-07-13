@@ -80,10 +80,40 @@ def test_is_stale_bar_todays_bar_while_open_is_fresh():
     assert is_stale_bar(today_bar, _dt(2026, 7, 6, 12, 0)) is False
 
 
-def test_is_stale_bar_old_bar_while_closed_is_legit():
+def test_last_trading_day_on_open_weekday_is_today():
+    from app.market import last_trading_day
+
+    assert last_trading_day(_dt(2026, 7, 6, 12, 0)) == _dt(2026, 7, 6, 0, 0).date()
+
+
+def test_last_trading_day_on_weekend_rolls_back_to_friday():
+    from app.market import last_trading_day
+
+    assert last_trading_day(_dt(2026, 7, 5, 12, 0)) == _dt(2026, 7, 3, 0, 0).date()  # Pazar->Cuma
+    assert last_trading_day(_dt(2026, 7, 4, 12, 0)) == _dt(2026, 7, 3, 0, 0).date()  # Cmt->Cuma
+
+
+def test_last_trading_day_on_holiday_rolls_back():
+    from app.market import last_trading_day
+
+    # 2026-10-29 Persembe (Cumhuriyet Bayrami, varsayilan tatil listesinde).
+    assert last_trading_day(_dt(2026, 10, 29, 12, 0)) == _dt(2026, 10, 28, 0, 0).date()
+
+
+def test_is_stale_bar_frozen_source_detected_while_market_closed():
+    # MEDIUM-6: piyasa kapaliyken bar yasina hic bakilmiyordu -- 2 hafta onceki
+    # donmus bir bar "son kapanis" gibi gecip alarmsiz kaliyordu (canli TV
+    # olayinin ayni sinifi: kaynak donuyor, guard'in bunu kapali seansta da
+    # yakalamasi gerekir). Son islem gunune (Cuma) gore kiyaslanmali.
     from app.market import is_stale_bar
 
-    # Piyasa kapaliyken son kapanis mesru veridir; bayat SAYILMAZ.
+    two_weeks_ago = _dt(2026, 6, 19, 18, 15)
+    assert is_stale_bar(two_weeks_ago, _dt(2026, 7, 5, 12, 0)) is True  # Pazar, kapali
+
+
+def test_is_stale_bar_last_friday_close_while_closed_still_legit():
+    from app.market import is_stale_bar
+
     friday_close = _dt(2026, 7, 3, 18, 15)
     assert is_stale_bar(friday_close, _dt(2026, 7, 5, 12, 0)) is False  # Pazar, kapali
 

@@ -74,18 +74,24 @@ def test_parse_quote_basic():
     assert q.source == "tradingview"
     assert q.delayed is True
     assert q.updated_at is not None
-    # HIGH-1: `time` kolonu bar'in gercek zamanini verir; guard (is_stale_bar)
-    # bu kaynak icin de calisabilsin diye exchange_time'a tasinmali.
-    assert q.exchange_time is not None
-    assert int(q.exchange_time.timestamp()) == _THYAO_EPOCH
+    # HIGH-4 (review delta): `time` kolonu BAR'IN ACILIS zamanini verir, gercek
+    # islem anini DEGIL (canli kanitla dogrulandi -- ayni gun icinde sabit
+    # kalir, THYAO fiyati degistigi halde). Bu yuzden exchange_time'a DEGIL
+    # bar_time'a tasinir; exchange_time bu kaynak icin HER ZAMAN None kalir
+    # (yas hesabi yaniltici bar-acilis damgasindan degil updated_at'ten
+    # yapilsin diye). is_stale_bar guard'i (H2) bar_time uzerinden calisir.
+    assert q.bar_time is not None
+    assert int(q.bar_time.timestamp()) == _THYAO_EPOCH
+    assert q.exchange_time is None
 
 
-def test_parse_quote_missing_time_leaves_exchange_time_none():
-    # `time` saglanmiyorsa exchange_time acikca None kalir (baska bir alandan
+def test_parse_quote_missing_time_leaves_bar_time_none():
+    # `time` saglanmiyorsa bar_time acikca None kalir (baska bir alandan
     # tahmin edilmez).
     row = {"s": "BIST:THYAO", "d": [334.0, 0.75, 0.22, 1, 2, 3, 4, 334.0]}
     q = parse_quote(row)
     assert q is not None
+    assert q.bar_time is None
     assert q.exchange_time is None
 
 

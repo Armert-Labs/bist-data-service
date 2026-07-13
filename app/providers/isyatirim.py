@@ -56,7 +56,7 @@ def _parse_date(value) -> datetime | None:
         return None
 
 
-def parse_quote(bist_symbol: str, rows: list[dict], now: datetime | None = None) -> Quote | None:
+def parse_quote(bist_symbol: str, rows: list[dict]) -> Quote | None:
     """value[] satirlarindan Quote uretir. AGSIZ; test edilebilir saf fonksiyon."""
     rows = [r for r in (rows or []) if _f(r.get("HGDG_KAPANIS")) is not None]
     if not rows:
@@ -80,12 +80,14 @@ def parse_quote(bist_symbol: str, rows: list[dict], now: datetime | None = None)
         change = round(price - previous_close, 4)
         change_percent = round((price - previous_close) / previous_close * 100.0, 2)
 
-    # H2: bu kaynak gunluk EOD cubuk dondurur; son cubugun tarihi exchange_time'a
-    # tasinmazsa seans-ici bayat-bar guard'i (market.is_stale_bar) bu kaynak icin
-    # hicbir zaman devreye giremez (exchange_time=None her zaman "taze" sayilir).
+    # H2/HIGH-4: bu kaynak gunluk EOD cubuk dondurur, GERCEK bir islem-ani
+    # vermez -- son cubugun tarihi bar_time'a tasinir (bayat-bar guard'i,
+    # market.is_stale_bar, bunu kullanir). exchange_time BILEREK None birakilir:
+    # eskiden kapanis-anini (18:15 TR) uydurup exchange_time'a koyuyorduk
+    # (klemp gerektiriyordu -- MEDIUM-2), ama bu GERCEK bir islem-ani degildi;
+    # yas hesabi (data_age_seconds) bunun yerine updated_at'e dusuyor.
     last_date = _parse_date(last.get("HGDG_TARIH"))
-    moment = now or datetime.now(UTC)
-    exchange_time = min(market_close_time(last_date.date()), moment) if last_date else None
+    bar_time = market_close_time(last_date.date()) if last_date else None
 
     return Quote(
         symbol=bist_symbol,
@@ -101,7 +103,7 @@ def parse_quote(bist_symbol: str, rows: list[dict], now: datetime | None = None)
         source="isyatirim",
         delayed=True,
         updated_at=datetime.now(UTC),
-        exchange_time=exchange_time,
+        bar_time=bar_time,
     )
 
 

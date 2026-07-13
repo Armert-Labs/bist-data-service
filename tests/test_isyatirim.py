@@ -4,7 +4,7 @@ Gercek Is Yatirim `value[]` response formatiyla parse_quote'u dogrular.
 Boylece kodun dogrulugu, ag erisiminden bagimsiz olarak kanitlanir.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC
 
 import httpx
 import respx
@@ -46,11 +46,14 @@ def test_parse_quote_basic():
     assert q.volume == 1200000
     assert q.source == "isyatirim"
     assert q.delayed is True
-    # H2: son bar'in tarihi (HGDG_TARIH) exchange_time'a tasinmali -- aksi halde
-    # seans-ici bayat-bar guard'i (is_stale_bar) bu kaynak icin hicbir zaman
-    # devreye giremez (exchange_time=None her zaman "taze" sayilirdi).
-    assert q.exchange_time is not None
-    assert q.exchange_time.astimezone(UTC).date().isoformat() == "2026-07-02"
+    # H2/HIGH-4: son bar'in tarihi (HGDG_TARIH) bar_time'a tasinmali -- aksi
+    # halde seans-ici bayat-bar guard'i (is_stale_bar) bu kaynak icin hicbir
+    # zaman devreye giremez. exchange_time bu kaynak icin HER ZAMAN None
+    # kalir -- bu, uydurma bir "kapanis ani" degil, kaynagin gercek islem-ani
+    # SAGLAMADIGININ acikca ifadesidir (yas hesabi updated_at'e duser).
+    assert q.bar_time is not None
+    assert q.bar_time.astimezone(UTC).date().isoformat() == "2026-07-02"
+    assert q.exchange_time is None
 
 
 def test_parse_quote_empty_returns_none():
@@ -89,7 +92,7 @@ def test_parse_quote_sorts_unordered_rows_by_date():
     q = parse_quote("GARAN", scrambled)
     assert q.price == 134.4  # 07-07 kapanisi (rows[-1]=29-06=137.3 DEGIL)
     assert q.previous_close == 133.7  # 06-07 kapanisi (tarihe gore bir onceki)
-    assert q.exchange_time.astimezone(UTC).date().isoformat() == "2026-07-07"
+    assert q.bar_time.astimezone(UTC).date().isoformat() == "2026-07-07"
 
 
 def test_parse_quote_unparseable_date_not_picked_as_latest():
@@ -103,24 +106,17 @@ def test_parse_quote_unparseable_date_not_picked_as_latest():
     assert q.price == 110.0  # 07-07, bozuk-tarihli 999.0 degil
 
 
-def test_parse_quote_clamps_future_exchange_time_to_now():
-    # MEDIUM-2: bar BUGUNE ait ve seans devam ediyorsa (henuz kapanis saati
-    # gelmedi), market_close_time GELECEK bir damga uretir -- bu, okuma
-    # aninda hesaplanan data_age_seconds'i negatif yapardi. exchange_time
-    # "simdi"yi asamaz; en fazla "simdi" kadar guncel olabilir.
+def test_parse_quote_never_sets_exchange_time():
+    # HIGH-4 (review delta): eskiden bar'in kapanis-anini UYDURUP (min ile
+    # klemplenerek) exchange_time'a koyuyorduk (MEDIUM-2) -- bu kaynak GERCEK
+    # bir islem-ani vermiyor, dolayisiyla exchange_time HER ZAMAN None kalmali
+    # (yas hesabi updated_at'e dussun, uydurma bir zamana degil). Bar tarihi
+    # yalnizca bar_time'da (guard icin) ifade edilir.
     rows = [{"HGDG_TARIH": "13-07-2026", "HGDG_KAPANIS": 100.0}]
-    now = datetime(2026, 7, 13, 11, 0, tzinfo=UTC)  # TR 14:00 -- kapanistan (18:15) ONCE
-    q = parse_quote("THYAO", rows, now=now)
+    q = parse_quote("THYAO", rows)
     assert q is not None
-    assert q.exchange_time == now
-
-
-def test_parse_quote_does_not_clamp_past_exchange_time():
-    rows = [{"HGDG_TARIH": "10-07-2026", "HGDG_KAPANIS": 100.0}]
-    now = datetime(2026, 7, 13, 11, 0, tzinfo=UTC)
-    q = parse_quote("THYAO", rows, now=now)
-    assert q is not None
-    assert q.exchange_time < now  # gercek kapanis zamani, klemplenmedi
+    assert q.exchange_time is None
+    assert q.bar_time is not None
 
 
 @respx.mock

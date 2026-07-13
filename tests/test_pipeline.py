@@ -3,9 +3,10 @@
 from dataclasses import replace
 from datetime import UTC, datetime
 
+from app import metrics
 from app.config import settings
 from app.models import Quote
-from app.pipeline import cross_validate_quotes, fetch_quotes
+from app.pipeline import compare_against_references, cross_validate_quotes, fetch_quotes
 from app.store import MemoryStore
 
 # 2026-07-06 Pazartesi, seans ici.
@@ -45,7 +46,10 @@ async def test_cross_validate_rejects_drift(monkeypatch):
         name = "yahoo_chart"
 
         async def fetch_quotes(self, symbols):
-            return {s: Quote(symbol=s, price=200.0) for s in symbols}
+            # MEDIUM-5 (test hijyeni): damgasiz-referans guard'i seans acikken
+            # devrededir -- bu testin amaci drift reddi, tazelik degil; guncel
+            # bar_time vererek wall-clock seans durumundan bagimsiz kalir.
+            return {s: Quote(symbol=s, price=200.0, bar_time=datetime.now(UTC)) for s in symbols}
 
     monkeypatch.setattr("app.pipeline.aggregator.get_provider", lambda name: FakeRef())
 
@@ -80,8 +84,13 @@ async def test_cross_validate_excludes_own_source_as_reference(monkeypatch):
         name = "isyatirim"
 
         async def fetch_quotes(self, symbols):
-            # Bagimsiz kaynak: gercek %5 sapma.
-            return {s: Quote(symbol=s, price=105.0, source="isyatirim") for s in symbols}
+            # Bagimsiz kaynak: gercek %5 sapma. bar_time verilir (MEDIUM-5
+            # damgasiz-referans guard'i wall-clock seans durumundan bagimsiz
+            # kalsin -- bu testin amaci own-source dislama, tazelik degil).
+            return {
+                s: Quote(symbol=s, price=105.0, source="isyatirim", bar_time=datetime.now(UTC))
+                for s in symbols
+            }
 
     providers = {"yahoo_chart": SelfSource(), "isyatirim": Independent()}
     monkeypatch.setattr("app.pipeline.aggregator.get_provider", lambda name: providers.get(name))
@@ -190,6 +199,86 @@ async def test_cross_validate_prod_default_survives_isyatirim_staleness(monkeypa
     assert "THYAO" in out
 
 
+async def test_cross_validate_untimed_reference_ignored_during_session(monkeypatch):
+    """MEDIUM-5: aggregator seans icinde damgasiz (ne bar_time NE exchange_time)
+    bir quote'u guvenilmez sayip dusürür -- referans secici de ayni kurala
+    uymali, aksi halde feed'in attigi veri arka kapidan referans olarak
+    girerdi (asimetri)."""
+    monkeypatch.setattr(
+        "app.pipeline.settings",
+        replace(
+            settings,
+            write_cross_validate=True,
+            cross_validate_max_pct=1.0,
+            validate_providers=["isyatirim"],
+        ),
+    )
+
+    class UntimedIsYatirim:
+        name = "isyatirim"
+
+        async def fetch_quotes(self, symbols):
+            # exchange_time VE bar_time yok -- aggregator bu quote'u seans
+            # icinde tamamen dusürürdü (HIGH-1 guard'i).
+            return {s: Quote(symbol=s, price=999.0, source="isyatirim") for s in symbols}
+
+    monkeypatch.setattr("app.pipeline.aggregator.get_provider", lambda name: UntimedIsYatirim())
+
+    quotes = {"THYAO": Quote(symbol="THYAO", price=336.75, source="yahoo_chart")}
+    out = await cross_validate_quotes(quotes, now=_OPEN_NOW)
+    # Damgasiz referans yuzunden reddedilmedi -- fail-quiet oldugu gibi gecti.
+    assert out["THYAO"].price == 336.75
+
+
+async def test_cross_validate_untimed_reference_accepted_when_market_closed(monkeypatch):
+    """Kapali seansta damgasizlik kurali gecerli degil (tazelik zaten kural
+    disi) -- damgasiz referans yine de karsilastirmaya girebilmeli."""
+    monkeypatch.setattr(
+        "app.pipeline.settings",
+        replace(
+            settings,
+            write_cross_validate=True,
+            cross_validate_max_pct=1.0,
+            validate_providers=["isyatirim"],
+        ),
+    )
+    _closed_now = datetime(2026, 7, 5, 9, 0, tzinfo=UTC)  # Pazar
+
+    class UntimedIsYatirim:
+        name = "isyatirim"
+
+        async def fetch_quotes(self, symbols):
+            return {s: Quote(symbol=s, price=999.0, source="isyatirim") for s in symbols}
+
+    monkeypatch.setattr("app.pipeline.aggregator.get_provider", lambda name: UntimedIsYatirim())
+
+    quotes = {"THYAO": Quote(symbol="THYAO", price=336.75, source="yahoo_chart")}
+    out = await cross_validate_quotes(quotes, now=_closed_now)
+    # %197 sapma referans olarak KABUL EDILIP reddedilmeli (damgasizlik engeli yok).
+    assert "THYAO" not in out
+
+
+async def test_compare_against_references_default_records_metric():
+    """LOW-3 varsayilan davranis: record_metrics parametresi verilmezse
+    (run_drift_monitor gibi arka plan cagrilari) sayac ARTAR."""
+    before = metrics.VALIDATE_NO_REFERENCE.labels(reason="no_data")._value.get()
+    primary = {"THYAO": Quote(symbol="THYAO", price=336.75, source="yahoo_chart")}
+    compare_against_references(primary, ["THYAO"], {}, now=_OPEN_NOW)
+    after = metrics.VALIDATE_NO_REFERENCE.labels(reason="no_data")._value.get()
+    assert after == before + 1
+
+
+async def test_compare_against_references_validate_endpoint_skips_metric():
+    """LOW-3: `/validate` (main.py) `record_metrics=False` gecer -- insan-teshis
+    poll'u arka plan drift-monitörünün gercek 'referans bulunamadi' oranini
+    sismemeli."""
+    before = metrics.VALIDATE_NO_REFERENCE.labels(reason="no_data")._value.get()
+    primary = {"THYAO": Quote(symbol="THYAO", price=336.75, source="yahoo_chart")}
+    compare_against_references(primary, ["THYAO"], {}, now=_OPEN_NOW, record_metrics=False)
+    after = metrics.VALIDATE_NO_REFERENCE.labels(reason="no_data")._value.get()
+    assert after == before
+
+
 async def test_drift_monitor_prod_default_detects_real_drift(monkeypatch):
     """HIGH-3 regresyon guard (prod DEFAULT config): own-source dislama
     olmadan yahoo_chart kendini dogrulayip VALIDATION_CONSISTENT'i kalici 1'de
@@ -204,7 +293,13 @@ async def test_drift_monitor_prod_default_detects_real_drift(monkeypatch):
         name = "tradingview"
 
         async def fetch_quotes(self, symbols):
-            return {s: Quote(symbol=s, price=360.0, source="tradingview") for s in symbols}
+            # bar_time verilir (MEDIUM-5 damgasiz-referans guard'i wall-clock
+            # seans durumundan bagimsiz kalsin -- bu testin amaci drift, tazelik
+            # degil).
+            return {
+                s: Quote(symbol=s, price=360.0, source="tradingview", bar_time=datetime.now(UTC))
+                for s in symbols
+            }
 
     providers = {"tradingview": TradingViewRef()}
     monkeypatch.setattr("app.pipeline.aggregator.get_provider", lambda name: providers.get(name))

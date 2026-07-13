@@ -108,6 +108,17 @@ class Settings:
     symbol_circuit_reset_seconds: float = field(
         default_factory=lambda: _get_float("SYMBOL_CIRCUIT_RESET_SECONDS", 300.0)
     )
+    # MEDIUM-7: guard'in (bayat-bar/damgasiz) TAMAMEN dusurdugu bir kaynak, bu
+    # symbol_circuit'ten MUAF oldugu icin (MEDIUM-3) baska hicbir frenle
+    # karsilasmiyordu -- seans boyunca sonsuza kadar (her turda) sorulmaya
+    # devam edebilirdi. N tur ust uste TAMAMEN guard'la duserse kaynak
+    # provider-seviyesinde gecici olarak cooldown'a alinir.
+    guard_cooldown_fail_threshold: int = field(
+        default_factory=lambda: _get_int("GUARD_COOLDOWN_FAIL_THRESHOLD", 3)
+    )
+    guard_cooldown_seconds: float = field(
+        default_factory=lambda: _get_float("GUARD_COOLDOWN_SECONDS", 1800.0)
+    )
     # Yazma aninda capraz-kaynak dogrulama (on-demand icin varsayilan acik).
     write_cross_validate: bool = field(
         default_factory=lambda: _get_bool("WRITE_CROSS_VALIDATE", True)

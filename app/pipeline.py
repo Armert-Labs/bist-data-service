@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from . import metrics
 from .aggregator import aggregator
 from .config import settings
-from .market import is_stale_bar, market_state
+from .market import is_market_open, is_stale_bar, market_state
 from .models import Quote
 from .store import Store
 
@@ -39,6 +39,8 @@ def _pick_reference(
     own_source: str,
     provider_quotes: dict[str, dict[str, Quote]],
     now: datetime,
+    *,
+    record_metrics: bool = True,
 ) -> tuple[Quote | None, str | None]:
     """Ilk-kazanir sirayla bagimsiz referans secer.
 
@@ -47,24 +49,44 @@ def _pick_reference(
     dondurur, bu da sahte "tutarli" gorunumu verir). Bayat bar dondüren
     kaynaklar da elenir (H2 guard'i referans yolunda da gecerli).
 
-    Bulunamazsa `(None, reason)` doner ve `bist_validate_no_reference_total`
-    sayacini reason etiketiyle artirir -- cross_validate_quotes/
-    run_drift_monitor/`/validate` AYNI cekirdegi kullandigi icin "temiz" ile
-    "hic bakilamadi" tum caginda ayni sekilde raporlanir (review MEDIUM-1).
+    MEDIUM-5: aggregator seans icinde damgasiz (ne exchange_time NE bar_time)
+    bir quote'u "guvenilmez" sayip TAMAMEN dusürür (bkz. aggregator.py HIGH-1
+    guard'i). Ayni feed'in guvenilmez dedigi veri dogrulamanin REFERANSI
+    olamaz -- aksi halde aggregator'in attigi veri, referans yolundan arka
+    kapidan geri girip sahte bir "tutarli" sonucu uretebilirdi (asimetri).
+
+    Bulunamazsa `(None, reason)` doner ve (LOW-3: `record_metrics=True` ise)
+    `bist_validate_no_reference_total` sayacini reason etiketiyle artirir --
+    cross_validate_quotes/run_drift_monitor/`/validate` AYNI cekirdegi
+    kullandigi icin "temiz" ile "hic bakilamadi" tum caginda ayni sekilde
+    raporlanir (review MEDIUM-1). `/validate` insan-teshis (operator poll'u)
+    oldugu icin `record_metrics=False` gecer -- aksi halde bu salt-okunur
+    endpoint'e yapilan her cagri, arka plan drift monitörünün gercek
+    "referans bulunamadi" oranini sisirirdi (review LOW-3).
     """
     saw_stale = False
+    saw_untimed = False
+    market_open_now = is_market_open(now)
     for name in settings.validate_providers:
         if name == own_source:
             continue
         candidate = provider_quotes.get(name, {}).get(symbol)
         if candidate is None:
             continue
-        if is_stale_bar(candidate.exchange_time, now):
+        if market_open_now and candidate.bar_time is None and candidate.exchange_time is None:
+            saw_untimed = True
+            continue
+        # HIGH-4: bar_time TERCIH EDILIR (aggregator.py guard'iyla ayni
+        # sozlesme) -- isyatirim/tradingview artik exchange_time'i hic
+        # doldurmuyor, yalnizca exchange_time'a bakmak bu kaynaklar icin
+        # bayat referanslarin hic elenmemesine yol acardi.
+        if is_stale_bar(candidate.bar_time or candidate.exchange_time, now):
             saw_stale = True
             continue
         return candidate, None
-    reason = "stale" if saw_stale else "no_data"
-    metrics.VALIDATE_NO_REFERENCE.labels(reason=reason).inc()
+    reason = "no_timestamp" if saw_untimed else ("stale" if saw_stale else "no_data")
+    if record_metrics:
+        metrics.VALIDATE_NO_REFERENCE.labels(reason=reason).inc()
     return None, reason
 
 
@@ -101,12 +123,17 @@ def compare_against_references(
     syms: list[str],
     provider_quotes: dict[str, dict[str, Quote]],
     now: datetime | None = None,
+    *,
+    record_metrics: bool = True,
 ) -> dict:
     """Verdict cekirdegi: own-source-disli + bayat-filtreli referans
     (`_pick_reference`) ile max sapma/tutarlilik hesaplar.
 
     GAUGE YAZMAZ -- caller karar verir (run_drift_monitor yazar, `/validate`
     salt-okunur insan-teshis endpoint'i oldugu icin yazmaz; review MEDIUM-1).
+    `record_metrics=False`: `bist_validate_no_reference_total` sayacina da
+    yazma (LOW-3 -- `/validate` operator poll'u drift-monitörü sayacini
+    sismesin).
     """
     moment = now or datetime.now(UTC)
     max_dev = 0.0
@@ -115,7 +142,9 @@ def compare_against_references(
         p = primary.get(s)
         if p is None or p.price is None:
             continue
-        ref, _reason = _pick_reference(s, p.source, provider_quotes, moment)
+        ref, _reason = _pick_reference(
+            s, p.source, provider_quotes, moment, record_metrics=record_metrics
+        )
         if ref is None or ref.price is None or ref.price == 0:
             continue
         dev = abs(p.price - ref.price) / ref.price * 100.0

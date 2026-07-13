@@ -92,6 +92,21 @@ def _safe_int(value) -> int | None:
     return int(f) if f is not None else None
 
 
+def _bar_time_from_index(row_label) -> datetime | None:
+    """DataFrame satirinin index etiketini (gunluk bar tarihi) bar_time'a
+    cevirir. Datetime-benzeri degilse (beklenmedik/sentetik veri) None doner
+    -- crash etmez (MEDIUM-5: yahoo hic zaman damgasi vermiyordu; bu, mevcut
+    veriden ucretsiz elde edilen bir bar_time kaynagidir)."""
+    ts = row_label
+    if hasattr(ts, "to_pydatetime"):
+        ts = ts.to_pydatetime()
+    if not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts
+
+
 def _quote_from_frame(bist_symbol: str, df: pd.DataFrame | None) -> Quote | None:
     if df is None or getattr(df, "empty", True):
         return None
@@ -126,6 +141,7 @@ def _quote_from_frame(bist_symbol: str, df: pd.DataFrame | None) -> Quote | None
         source="yahoo",
         delayed=True,
         updated_at=datetime.now(UTC),
+        bar_time=_bar_time_from_index(last.name),
     )
 
 

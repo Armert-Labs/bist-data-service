@@ -48,7 +48,22 @@ class Quote(BaseModel):
     delayed: bool = Field(True, description="Veri gecikmeli mi (BIST icin evet)")
     updated_at: datetime | None = Field(None, description="Onbellege alinma zamani (UTC)")
     exchange_time: datetime | None = Field(
-        None, description="Borsadaki gercek islem zamani (kaynak sagliyorsa; UTC)"
+        None,
+        description=(
+            "Borsadaki GERCEK islem anini verirse (kaynak saglar) UTC; vermezse "
+            "(orn. TradingView bar-acilis damgasi verir, isyatirim hic vermez) None. "
+            "SADECE bu alan yas (data_age_seconds) hesabinda kullanilir -- bar_time "
+            "ile karistirilmamali (review HIGH-4)."
+        ),
+    )
+    bar_time: datetime | None = Field(
+        None,
+        description=(
+            "Fiyatin dayandigi bar'in ait oldugu gun/an (gun granülerligi yeterli; "
+            "UTC). Bayat-bar guard'i (is_stale_bar) bunu kullanir -- exchange_time "
+            "yoksa (veya bar-acilis gibi yaniltici bir zaman ifade ediyorsa) bile "
+            "guard bu alandan calisabilir."
+        ),
     )
     data_age_seconds: float | None = Field(
         None,
