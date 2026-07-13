@@ -10,14 +10,16 @@
 > toplayan; Redis'te önbellekleyen; **REST + SSE + Prometheus** ile sunan üretim sınıfı
 > bir veri kaynağı mikroservisi. Login/oturum gerektirmez.
 
-Kaynaklar: **Yahoo Finance** (yfinance + v8 chart) + **TradingView** (scanner) + **İş Yatırım** (bağımsız fallback).
+Kaynaklar: **Yahoo Finance** (v8 chart, birincil) + **İş Yatırım** (bağımsız fallback,
+piyasa kapalıyken). **TradingView** (scanner) provider sınıfı vardır ama **hukuki
+gerekçeyle (ToS) varsayılan zincirden çıkarılmıştır** — bkz. aşağıdaki not.
 
 ---
 
 ## ✨ Özellikler
 
 - 🔌 **Tek uç noktadan tüm BIST** — `GET /all` ile ~500+ hissenin anlık fiyatı
-- 🔁 **Çok katmanlı fallback** — Yahoo chart → TradingView → İş Yatırım + circuit breaker
+- 🔁 **Çok katmanlı fallback** — Yahoo chart → İş Yatırım + circuit breaker (TradingView opsiyonel, env ile)
 - 📡 **Canlı akış** — Redis pub/sub tabanlı SSE fan-out (`/stream`)
 - ✅ **Fiyat doğrulama** — çapraz-kaynak karşılaştırma + sapma metriği (`/validate`)
 - 🔐 **Kimlik doğrulama** — çoklu API key, timing-safe, SHA-256 hash saklama
@@ -30,10 +32,10 @@ Kaynaklar: **Yahoo Finance** (yfinance + v8 chart) + **TradingView** (scanner) +
 ```mermaid
 flowchart LR
     subgraph sources[Veri Kaynaklari]
-        Y[Yahoo yfinance]
         YC[Yahoo v8 chart]
-        TV[TradingView scanner]
         IY[Is Yatirim]
+        Y[Yahoo yfinance / opsiyonel]
+        TV[TradingView scanner / opsiyonel, ToS-kisitli]
     end
     U[updater\ncircuit breaker + sanity-check] -->|cek| sources
     U -->|yaz + publish| R[(Redis\ncache + pub/sub)]
@@ -46,27 +48,30 @@ flowchart LR
 - **updater** — tek yazıcı; batch çeker, doğrular, Redis'e yazar, pub/sub yayınlar
 - **api** — stateless, N kopyaya ölçeklenir; Redis'ten okur, SSE'yi pub/sub ile besler
 - **Redis yoksa** — updater API içinde çalışır (tek instance, in-memory); `REDIS_URL` boş bırakın
+- **`yahoo` ve `tradingview` varsayılan zincirde DEĞİL** (provider sınıfları silinmedi,
+  env ile geri eklenebilir) — `yahoo` teknik risk (crumb/cookie asılma), `tradingview`
+  ise **hukuki** gerekçeyle (ToS §3, aşağıya bakın) dışarıda tutuluyor.
 
 ### 🕰️ Seans-içi kaynak zinciri gerçeği + bayat-veri düşürme politikası
 
 **İş Yatırım günlük EOD (End-Of-Day) çubuk döndürür** — gün içinde birden fazla
-kez sorgulansa da her seferinde *aynı günün* tek kapanış fiyatını verir.
-**TradingView** de bar-bazlı çalışır (`time` alanı bar-açılış anıdır, gerçek
-işlem anı değil). Seans **açıkken** bu artık kabul edilmez: her quote'un
-dayandığı bar'ın günü (`bar_time`; sağlamıyorsa `exchange_time`) bugüne ait
-değilse (piyasa açıkken) kaynak o sembol için **"hiç veri dönmemiş"** sayılır
-ve fallback zincirinde bir sonraki kaynağa düşülür (`bist_stale_bar_skipped_total`).
-Aynı kural, **hiçbir zaman damgası** (ne `bar_time` ne `exchange_time`)
-üretemeyen bir kaynak için de geçerlidir (`bist_missing_exchange_time_total`)
-— damgasız veri seans içinde güvenilmez kabul edilir. `exchange_time` ve
-`bar_time` farklı amaçlara hizmet eder — bkz. Quote şeması tablosu.
+kez sorgulansa da her seferinde *aynı günün* tek kapanış fiyatını verir. Seans
+**açıkken** bu artık kabul edilmez: her quote'un dayandığı bar'ın günü
+(`bar_time`; sağlamıyorsa `exchange_time`) bugüne ait değilse (piyasa açıkken)
+kaynak o sembol için **"hiç veri dönmemiş"** sayılır ve fallback zincirinde bir
+sonraki kaynağa düşülür (`bist_stale_bar_skipped_total`). Aynı kural,
+**hiçbir zaman damgası** (ne `bar_time` ne `exchange_time`) üretemeyen bir
+kaynak için de geçerlidir (`bist_missing_exchange_time_total`) — damgasız veri
+seans içinde güvenilmez kabul edilir. `exchange_time` ve `bar_time` farklı
+amaçlara hizmet eder — bkz. Quote şeması tablosu.
 
-Pratik sonucu: **seans içinde fiili canlı-fiyat zinciri `yahoo_chart` +
-`tradingview`'dir** — İş Yatırım yalnızca **piyasa kapalıyken** (son kapanış
-meşru veridir) devreye girer. Bu, bilinçli bir tasarım kararıdır (sessizce
-bayat fiyat servis etmek yerine açıkça düşürmek); `/ready`'deki `providers`
-durumu "sağlıklı" görünse bile bir sembolün seans içinde İş Yatırım'dan hiç
-veri gelmiyor olması **beklenen** davranıştır.
+Pratik sonucu: **seans içinde fiili canlı-fiyat kaynağı yalnızca
+`yahoo_chart`'tır** — İş Yatırım yukarıdaki EOD-guard'ı yüzünden seans boyunca
+elenir, yalnızca **piyasa kapalıyken** (son kapanış meşru veridir) devreye
+girer. Bu, bilinçli bir tasarım kararıdır (sessizce bayat fiyat servis etmek
+yerine açıkça düşürmek); `/ready`'deki `providers` durumu "sağlıklı" görünse
+bile bir sembolün seans içinde İş Yatırım'dan hiç veri gelmiyor olması
+**beklenen** davranıştır.
 
 Bir kaynak **ardışık `GUARD_COOLDOWN_FAIL_THRESHOLD` (vars. 3) turda** yukarıdaki
 guard'lar yüzünden isteğinin **tamamını** kaybederse (yapısal olarak taze veri
@@ -77,6 +82,37 @@ gauge=1) — aksi halde sembol devre kesici bu düşüşleri saymadığı için
 (bilinçli tasarım) kaynak sonsuza kadar boşuna sorgulanmaya devam ederdi. En
 az bir quote geçtiğinde ardışık sayaç sıfırlanır; cooldown bitince kaynak
 yeniden denenir.
+
+### ⚖️ TradingView'in varsayılan zincirden çıkarılması (hukuki karar) + bilinen açık maddeler
+
+**TradingView Kullanım Şartları §3** veriyi **yalnızca ekranda-gösterim
+(display-only)** ile sınırlar; **otomatik işlem, algoritmik karar-verme, fiyat
+referanslama, order verification, risk-yönetim programları** kullanımını **ismen
+yasaklar** ve TradingView içeriğine dayalı ürün/servis üretmeyi de yasaklar.
+Abonelik satın almak bunu çözmez (satılan şey display-use lisansıdır). BistEye'in
+Faz-2'deki client-side stop-loss'u tam bu tanımın ortasına düşer — bu yüzden
+`tradingview` **varsayılan `PROVIDERS`/`VALIDATE_PROVIDERS` zincirinden çıkarıldı**.
+Provider sınıfı **silinmedi** (`app/providers/tradingview.py`), env ile geri
+eklenebilir (`PROVIDERS=yahoo_chart,tradingview,isyatirim`) **ama yalnızca
+insan-okur dashboard/teşhis amacıyla, bilinçli bir karar sonucu — çıktısı bot
+karar-yoluna (fiyat referanslama, stop-loss/emir tetikleme, otomatik işlem)
+bağlanmamalıdır.**
+
+**Bilinen ve kabul edilen sonuçlar (Faz-2 lisanslı realtime kaynak kararına
+bağlı açık madde):**
+
+- **Seans içi fallback kalmıyor:** İş Yatırım seans boyunca EOD/bayat bar
+  verdiği için guard onu düşürür → seans içinde fiilen **tek kaynak
+  `yahoo_chart`**. `yahoo_chart` düşerse feed durur (donma değil, veri
+  yokluğu — `/ready` `not ready` döner, alarm çalar). Bilinçli bir takas:
+  hukuki temizlik > dayanıklılık, çünkü bot henüz bu veriyi tüketmiyor.
+- **Çapraz doğrulama fiilen devre dışı:** seans içinde bağımsız referans
+  kalmıyor (birincil `yahoo_chart` kendi kaynağı olarak dışlanır, İş Yatırım
+  bayat) → `_pick_reference` **fail-quiet** döner (fiyatı reddetmez, sessizce
+  kabul eder), `bist_validate_no_reference_total{reason="stale"}` sayacı
+  artar. Bu, HIGH-2 fix'inin sağladığı kazanımın bilinçli olarak geri
+  alınması demektir — gerçek (lisanslı) bir realtime referans kaynağı
+  gelene kadar başka çözümü yok.
 
 ---
 
@@ -280,11 +316,11 @@ curl -H "X-API-Key: <anahtar>" "http://localhost:8000/validate?symbols=THYAO,GAR
 ```json
 {
   "checked": 2,
-  "compared": true,
+  "compared": false,
   "threshold_pct": 1.0,
-  "reference_status": { "yahoo_chart": "ok", "tradingview": "ok", "isyatirim": "ok" },
-  "max_deviation_pct": 0.12,
-  "consistent": true,
+  "reference_status": { "yahoo_chart": "ok", "isyatirim": "veri_yok" },
+  "max_deviation_pct": 0.0,
+  "consistent": false,
   "comparisons": [
     {
       "symbol": "THYAO",
@@ -292,13 +328,20 @@ curl -H "X-API-Key: <anahtar>" "http://localhost:8000/validate?symbols=THYAO,GAR
       "primary_source": "yahoo_chart",
       "references": {
         "yahoo_chart": { "price": 348.25, "deviation_pct": 0.0, "ok": true, "self": true },
-        "tradingview": { "price": 347.83, "deviation_pct": 0.12, "ok": true, "self": false },
-        "isyatirim": { "price": 348.25, "deviation_pct": 0.0, "ok": true, "self": false }
+        "isyatirim": { "price": null, "deviation_pct": null, "ok": false, "self": false }
       }
     }
   ]
 }
 ```
+
+> **Seans içi tipik durum (bilinçli takas, yukarıya bakın):** varsayılan zincirde
+> (`tradingview` yok) birincil kaynak `yahoo_chart` iken tek olası bağımsız
+> referans İş Yatırım'dır; o da seans içinde EOD-guard'ı yüzünden elenir —
+> yukarıdaki örnekte olduğu gibi `compared: false` ("tutarsız" DEĞİL, "hiçbir
+> bağımsız referansla karşılaştırılamadı") görmek **beklenen** davranıştır.
+> `PROVIDERS`/`VALIDATE_PROVIDERS`'a `tradingview` env ile eklenirse (yalnızca
+> insan-teşhis amacıyla) üçüncü bir referans daha görünür.
 
 > **`self` alanı:** Quote'un KENDİ kaynağıyla karşılaştırılan referans (`self: true`)
 > her zaman ~%0 sapma verir (aynı kaynağın tekrar sorgulanmasıdır) — bu **totolojik**
@@ -730,7 +773,7 @@ Ayrıntılar için [CONTRIBUTING.md](CONTRIBUTING.md).
 | Değişken | Varsayılan | Açıklama |
 |---|---|---|
 | `REDIS_URL` | *(boş)* | Boş = in-memory. Compose: `redis://redis:6379/0` |
-| `PROVIDERS` | `yahoo_chart,tradingview,isyatirim` | Kaynak fallback zinciri (`yahoo` yfinance/curl_cffi auth-asılma riski nedeniyle varsayılandan çıkarıldı; provider silinmedi, env ile geri eklenebilir) |
+| `PROVIDERS` | `yahoo_chart,isyatirim` | Kaynak fallback zinciri (`yahoo` teknik risk, `tradingview` **hukuki** gerekçeyle — ToS §3, bkz. yukarısı — varsayılandan çıkarıldı; ikisi de provider sınıfı silinmeden env ile geri eklenebilir) |
 | `PROVIDER_MODE` | `failover` | `failover` \| `gapfill` |
 | `PROVIDER_FETCH_TIMEOUT` | `45` | Tek `provider.fetch_quotes()` çağrısı için sert üst sınır (sn); aşılırsa sonraki kaynağa düşülür |
 | `GUARD_COOLDOWN_FAIL_THRESHOLD` | `3` | Bir kaynağın ardışık kaç turda **tamamen** bayat-bar/damgasız guard'ıyla düşerse provider-seviyesinde cooldown'a alınacağı |

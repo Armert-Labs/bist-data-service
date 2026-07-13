@@ -186,6 +186,31 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
     bozuyordu. `_pick_reference`/`compare_against_references`'a
     `record_metrics` parametresi eklendi; `/validate` artık `False` geçer.
 
+### Hukuki / Uyum
+- **TradingView varsayılan zincirden çıkarıldı (patron kararı, ToS §3):**
+  TradingView Kullanım Şartları veriyi yalnızca ekranda-gösterim (display-only)
+  ile sınırlar; otomatik işlem, algoritmik karar-verme, fiyat referanslama,
+  order verification, risk-yönetim programları kullanımını ismen yasaklar.
+  Abonelik satın almak bunu çözmez (satılan şey display-use lisansıdır).
+  BistEye'in Faz-2'deki client-side stop-loss'u bu tanımın tam ortasına
+  düşüyor; servis henüz bu veriyi tüketmese de kaynak şimdiden temizlendi.
+  - `PROVIDERS` ve `VALIDATE_PROVIDERS` varsayılanlarından `tradingview`
+    çıkarıldı: `["yahoo_chart", "isyatirim"]`. Provider sınıfı **silinmedi**
+    (`app/providers/tradingview.py`), env ile geri eklenebilir ama YALNIZCA
+    insan-okur dashboard/teşhis amacıyla — modül docstring'inde, README'de ve
+    `.env.example`'da net uyarı var: çıktısı bot karar-yoluna
+    bağlanmamalıdır.
+  - **Bilinen ve kabul edilen sonuçlar** (Faz-2 lisanslı realtime kaynak
+    kararına bağlı açık madde — bkz. README "Bilinen açık maddeler"):
+    seans içinde fiilen tek kaynak `yahoo_chart` kalıyor (İş Yatırım EOD-guard'ı
+    yüzünden elenir; `yahoo_chart` düşerse feed durur, `/ready` not-ready
+    döner — donma değil, gözlemlenebilir bir alarm); çapraz doğrulama seans
+    içinde bağımsız referans bulamadığı için fail-quiet dönüyor
+    (`bist_validate_no_reference_total{reason="stale"}` artar) — bu, HIGH-2
+    fix'inin kazanımının bilinçli olarak geri alınması demektir.
+  - Not: Yahoo (`yahoo_chart`) da benzer bir ToS gri alanında; bu ayrı bir
+    karar (lisans süreci netleşene kadar servis "dashboard-only" konumda).
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi

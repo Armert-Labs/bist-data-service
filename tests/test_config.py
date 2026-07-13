@@ -104,26 +104,55 @@ def test_max_symbols_per_request_env_override(monkeypatch):
     assert Settings().max_symbols_per_request == 50
 
 
-def test_validate_providers_default_includes_tradingview(monkeypatch):
-    """HIGH-2 regresyon guard: eski varsayim [yahoo_chart, isyatirim] idi --
-    birincil yahoo_chart'tan gelince tek olasi bagimsiz referans isyatirim
-    kalirdi; isyatirim seans icinde H2 bayat-bar guard'i yuzunden elenince
-    dogrulama TAMAMEN olu kaliyordu. tradingview (artik exchange_time
-    sagliyor -- HIGH-1) bu tekli-referans riskini gideriyor."""
+def test_validate_providers_default_excludes_tradingview(monkeypatch):
+    """Patron karari (hukuki, TradingView ToS §3 -- otomatik islem/algoritmik
+    karar-verme/fiyat referanslama yasak): tradingview varsayilan
+    VALIDATE_PROVIDERS'tan CIKARILDI. BILINEN VE KABUL EDILEN SONUC (HIGH-2'nin
+    cozdugu tekli-referans riski GERI DONDU): birincil yahoo_chart'tan gelince
+    tek olasi bagimsiz referans isyatirim'dir; o da seans icinde H2 bayat-bar
+    guard'i yuzunden elenirse dogrulama fail-quiet doner (bkz.
+    test_pipeline.py::test_cross_validate_prod_default_fails_quiet_without_tradingview).
+    Provider sinifi silinmedi, env ile geri eklenebilir (yalnizca insan-okur
+    dashboard/teshis amaciyla -- bkz. providers/tradingview.py ust uyarisi)."""
     from app.config import Settings
 
     monkeypatch.delenv("VALIDATE_PROVIDERS", raising=False)
     cfg = Settings()
+    assert cfg.validate_providers == ["yahoo_chart", "isyatirim"]
+    assert "tradingview" not in cfg.validate_providers
+
+
+def test_validate_providers_env_can_still_reenable_tradingview(monkeypatch):
+    """Provider sinifi silinmedi -- env ile bilinçli olarak geri eklenebilir
+    (yalnizca insan-okur dashboard/teshis amaciyla, bot karar yoluna
+    baglanmamali; bkz. providers/tradingview.py ust uyarisi)."""
+    from app.config import Settings
+
+    monkeypatch.setenv("VALIDATE_PROVIDERS", "yahoo_chart,tradingview,isyatirim")
+    cfg = Settings()
     assert cfg.validate_providers == ["yahoo_chart", "tradingview", "isyatirim"]
 
 
-def test_default_providers_excludes_yahoo_from_live_chain(monkeypatch):
-    """yahoo (yfinance/curl_cffi crumb wedge riski) varsayilan zincirden cikarildi;
-    yahoo_chart onceki yerini alir. Provider sinifi hala PROVIDERS env'i ile geri
-    eklenebilir (silinmedi)."""
+def test_default_providers_excludes_yahoo_and_tradingview_from_live_chain(monkeypatch):
+    """yahoo (yfinance/curl_cffi crumb wedge riski) varsayilan zincirden
+    cikarildi; yahoo_chart onceki yerini alir. tradingview de PATRON KARARIYLA
+    (hukuki, ToS §3) varsayilan zincirden cikarildi. Ikisinin provider sinifi
+    da hala PROVIDERS env'i ile geri eklenebilir (silinmedi)."""
     from app.config import Settings
 
     monkeypatch.delenv("PROVIDERS", raising=False)
     cfg = Settings()
-    assert cfg.providers == ["yahoo_chart", "tradingview", "isyatirim"]
+    assert cfg.providers == ["yahoo_chart", "isyatirim"]
     assert "yahoo" not in cfg.providers
+    assert "tradingview" not in cfg.providers
+
+
+def test_providers_env_can_still_reenable_tradingview(monkeypatch):
+    """Provider sinifi silinmedi -- env ile bilinçli olarak geri eklenebilir
+    (yalnizca insan-okur dashboard/teshis amaciyla; bkz. providers/tradingview.py
+    ust uyarisi)."""
+    from app.config import Settings
+
+    monkeypatch.setenv("PROVIDERS", "yahoo_chart,tradingview,isyatirim")
+    cfg = Settings()
+    assert cfg.providers == ["yahoo_chart", "tradingview", "isyatirim"]
