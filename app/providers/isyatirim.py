@@ -24,6 +24,7 @@ import httpx
 
 from .. import symbols as sym
 from ..config import settings
+from ..market import market_close_time
 from ..models import HistoryBar, HistoryResponse, Quote
 from .base import Provider
 
@@ -79,6 +80,12 @@ def parse_quote(bist_symbol: str, rows: list[dict]) -> Quote | None:
         change = round(price - previous_close, 4)
         change_percent = round((price - previous_close) / previous_close * 100.0, 2)
 
+    # H2: bu kaynak gunluk EOD cubuk dondurur; son cubugun tarihi exchange_time'a
+    # tasinmazsa seans-ici bayat-bar guard'i (market.is_stale_bar) bu kaynak icin
+    # hicbir zaman devreye giremez (exchange_time=None her zaman "taze" sayilir).
+    last_date = _parse_date(last.get("HGDG_TARIH"))
+    exchange_time = market_close_time(last_date.date()) if last_date else None
+
     return Quote(
         symbol=bist_symbol,
         price=round(price, 4),
@@ -93,6 +100,7 @@ def parse_quote(bist_symbol: str, rows: list[dict]) -> Quote | None:
         source="isyatirim",
         delayed=True,
         updated_at=datetime.now(UTC),
+        exchange_time=exchange_time,
     )
 
 

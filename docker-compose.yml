@@ -26,9 +26,10 @@ services:
     # Updater HTTP servisi degildir; HTTP healthcheck'i devre disi birak.
     healthcheck:
       disable: true
-    # Prometheus icin updater metrik portu (compose agi icinden erisilir).
-    expose:
-      - "8001"
+    # Prometheus (VM140) icin updater metrik portu -- host'a publish edilir.
+    # Sadece 'expose' iken compose-agi DISINDAN (VM140) scrape edilemiyordu (H1).
+    ports:
+      - "8001:8001"
     # Webhook kullanmak icin: webhooks.json olusturun ve asagidaki satiri acin.
     # volumes:
     #   - ./webhooks.json:/app/webhooks.json:ro

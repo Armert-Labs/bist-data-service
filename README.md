@@ -160,7 +160,9 @@ curl -H "X-API-Key: <anahtar>" http://localhost:8000/quote/THYAO
   "source": "yahoo_chart",
   "delayed": true,
   "updated_at": "2026-07-08T05:32:28.389121Z",
-  "exchange_time": "2026-07-07T15:09:55Z"
+  "exchange_time": "2026-07-07T15:09:55Z",
+  "data_age_seconds": 3.2,
+  "stale": false
 }
 ```
 
@@ -570,6 +572,8 @@ Quote nesnesindeki alanlar (`/quote`, `/quotes`, `/all`, `/stream` içinde aynı
 | `delayed` | bool | BIST için **her zaman `true`** (gerçek-zamanlı değil) |
 | `updated_at` | ISO-8601 UTC | Servisin cache'e **yazım anı** (veri tazeliği bununla ölçülür) |
 | `exchange_time` | ISO-8601 UTC \| null | Borsadaki **gerçek işlem zamanı** (kaynak sağlarsa) |
+| `data_age_seconds` | number \| null | `exchange_time` (varsa) veya `updated_at`'ten bu yana geçen süre (sn); **okuma anında** hesaplanır |
+| `stale` | bool | Seans **açıkken** `data_age_seconds`, `STALENESS_SECONDS` eşiğini aşarsa `true`. Kapalıyken her zaman `false` (kapanış fiyatı bayatlamaz) |
 
 Zarf (envelope) düzeyi alanlar (`/all`, `/quotes`, `/stream`): `market`, `count`,
 `last_update`, `is_stale` (veri bayat mı), `delayed`, ve `/quotes`'ta `missing`.

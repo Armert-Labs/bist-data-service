@@ -23,6 +23,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -87,10 +88,20 @@ def _all_response(request: Request, body: bytes, etag: str) -> Response:
 
 
 def _with_live_state(q: Quote, state: str) -> Quote:
-    """market_state'i ANLIK duruma cevirir: kapanistan sonra cache'teki eski
-    OPEN damgasi istemciye sizmasin. Store objesi mutasyona ugratilmaz
-    (MemoryStore ayni nesneyi paylasir)."""
-    return q if q.market_state == state else q.model_copy(update={"market_state": state})
+    """market_state'i ANLIK duruma cevirir + okuma aninda data_age_seconds/stale
+    hesaplar (exchange_time varsa oradan, yoksa updated_at'ten). Store objesi
+    mutasyona ugratilmaz (MemoryStore ayni nesneyi paylasir); bu alanlar her
+    okumada degistigi icin artik HER zaman bir kopya doner."""
+    reference = q.exchange_time or q.updated_at
+    age = (datetime.now(UTC) - reference).total_seconds() if reference else None
+    stale = age is not None and state == "OPEN" and age > settings.staleness_seconds
+    return q.model_copy(
+        update={
+            "market_state": state,
+            "data_age_seconds": round(age, 2) if age is not None else None,
+            "stale": stale,
+        }
+    )
 
 
 def _sse_quotes_payload(
@@ -328,8 +339,6 @@ async def health() -> dict:
 @limiter.exempt
 async def ready() -> dict:
     """Readiness: store erisilebilir ve veri taze mi. (Trafik almaya hazir mi.)"""
-    from datetime import UTC, datetime
-
     # Store (Redis) tamamen koptugunde bile sozlesmedeki yapisal 503 govdesi
     # donmeli; ping ile cagri arasindaki yariska karsi tum erisim korunur.
     size, stale, oldest_age, fresh, last_age = 0, True, None, None, None

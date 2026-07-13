@@ -44,3 +44,12 @@ CROSS_SOURCE_DRIFT = Gauge(
     "bist_cross_source_drift_pct", "Son dogrulamada kaynaklar arasi maks fiyat sapmasi (%)"
 )
 VALIDATION_CONSISTENT = Gauge("bist_validation_consistent", "Son dogrulama tutarli mi (1/0)")
+
+STALE_BAR_SKIPPED = Counter(
+    "bist_stale_bar_skipped_total",
+    "Seans acikken bayat bar (dunku/eski veri noktasi) nedeniyle atlanan quote sayisi",
+    ["provider"],
+)
+QUOTES_BY_SOURCE = Gauge(
+    "bist_quotes_by_source", "Son guncelleme turunde kaynak basina yazilan quote sayisi", ["source"]
+)

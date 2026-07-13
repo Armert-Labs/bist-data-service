@@ -6,12 +6,20 @@ TradingView scanner de ayni cizgide bagimsiz bir kaynak/dogrulama saglar.
 Endpoint (quotes):
   POST https://scanner.tradingview.com/turkey/scan
   Govde: {"symbols":{"tickers":["BIST:THYAO","BIST:GARAN"],"query":{"types":[]}},
-          "columns":["lp","ch","chp","volume","open","high","low","prev_close_price"]}
-  Yanit: {"data":[{"s":"BIST:THYAO","d":[lp,ch,chp,volume,open,high,low,prev_close]}, ...]}
+          "columns":["lp","change_abs","change","volume","open","high","low","close"]}
+  Yanit: {"data":[{"s":"BIST:THYAO","d":[lp,change_abs,change,volume,open,high,low,close]}, ...]}
 
 Sembol esleme: bizim "THYAO" <-> TradingView "BIST:THYAO".
 Coklu sembol TEK POST'ta gonderilir (batch; Yahoo download gibi verimli).
 Scanner /scan zaman serisi sunmaz; fetch_history bos doner (durust davranis).
+
+NOT (M1 denetimi): "prev_close_price" kolonu bu /scan uc noktasinda desteklenmiyor
+(her zaman null donuyordu, ayni sekilde eski "ch"/"chp" isimleri de calismiyordu).
+Dogru/calisan kolonlar "change_abs" (mutlak degisim) ve "change" (yuzde degisim);
+previous_close bunlardan AYNI yanit icinde turetilir (price - change_abs) --
+baska bir kaynaga/uca gidilmez. change_abs de null gelirse previous_close
+ACIKCA None birakilir + loglanir (bu, canliya cikmadan dogrulanamamis bir
+varsayimdir; sonraki canli denetimde teyit edilmeli).
 """
 
 from __future__ import annotations
@@ -30,7 +38,8 @@ logger = logging.getLogger(__name__)
 _SCANNER_URL = "https://scanner.tradingview.com/turkey/scan"
 # Kolon sirasi yanit `d[]` dizisiyle birebir eslesir (index -> alan).
 # lp=last price (canli, piyasa kapaliyken null); close=son kapanis (fallback).
-_COLUMNS = ["lp", "ch", "chp", "volume", "open", "high", "low", "prev_close_price", "close"]
+# change_abs/change: mutlak/yuzde degisim (eski "ch"/"chp" isimleri calismiyordu).
+_COLUMNS = ["lp", "change_abs", "change", "volume", "open", "high", "low", "close"]
 _EXCHANGE = "BIST"
 _TIMEOUT = 10.0
 _HEADERS = {
@@ -80,15 +89,22 @@ def parse_quote(row: dict, columns: list[str] | None = None) -> Quote | None:
     if price is None:
         return None
 
-    change = _f(values.get("ch"))
-    change_percent = _f(values.get("chp"))
-    prev = _f(values.get("prev_close_price"))
+    change = _f(values.get("change_abs"))
+    change_percent = _f(values.get("change"))
     volume = _f(values.get("volume"))
+
+    previous_close: float | None = None
+    if change is not None:
+        # prev_close_price kolonu /scan'de calismiyor (hep null); ayni yanittaki
+        # change_abs'den turetiyoruz -- baska bir uca/kaynaga GITMIYORUZ.
+        previous_close = round(price - change, 4)
+    else:
+        logger.debug("tradingview %s: change_abs bos, previous_close hesaplanamiyor", bist)
 
     return Quote(
         symbol=bist,
         price=round(price, 4),
-        previous_close=round(prev, 4) if prev is not None else None,
+        previous_close=previous_close,
         change=round(change, 4) if change is not None else None,
         change_percent=round(change_percent, 2) if change_percent is not None else None,
         open=_f(values.get("open")),

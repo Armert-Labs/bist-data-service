@@ -50,6 +50,20 @@ class Quote(BaseModel):
     exchange_time: datetime | None = Field(
         None, description="Borsadaki gercek islem zamani (kaynak sagliyorsa; UTC)"
     )
+    data_age_seconds: float | None = Field(
+        None,
+        description=(
+            "Fiyatin dayandigi veri noktasindan (exchange_time varsa oradan, "
+            "yoksa updated_at'ten) bu yana gecen sure (sn); okuma aninda hesaplanir"
+        ),
+    )
+    stale: bool = Field(
+        False,
+        description=(
+            "Seans acikken data_age_seconds STALENESS_SECONDS esigini asarsa true. "
+            "Kapaliyken hep false (kapanis fiyati bayatlamaz)."
+        ),
+    )
 
 
 class HistoryBar(BaseModel):

@@ -55,3 +55,46 @@ def test_default_holidays_close_market():
     assert is_market_open(_dt(2026, 3, 20, 12, 0)) is False
     assert is_market_open(_dt(2026, 5, 28, 12, 0)) is False
     assert is_market_open(_dt(2026, 10, 29, 12, 0)) is False
+
+
+def test_is_stale_bar_none_exchange_time_never_stale():
+    from app.market import is_stale_bar
+
+    # exchange_time saglamayan kaynak (orn. TradingView) icin bu kural
+    # uygulanamaz; guard'siz gecer (baska bir mekanizma varsa o karar verir).
+    assert is_stale_bar(None, _dt(2026, 7, 6, 12, 0)) is False
+
+
+def test_is_stale_bar_yesterday_while_open_is_stale():
+    from app.market import is_stale_bar
+
+    # 2026-07-06 Pazartesi seans ici; bar 2026-07-03 Cuma kapanisina ait.
+    yesterday_bar = _dt(2026, 7, 3, 18, 15)
+    assert is_stale_bar(yesterday_bar, _dt(2026, 7, 6, 12, 0)) is True
+
+
+def test_is_stale_bar_todays_bar_while_open_is_fresh():
+    from app.market import is_stale_bar
+
+    today_bar = _dt(2026, 7, 6, 10, 5)
+    assert is_stale_bar(today_bar, _dt(2026, 7, 6, 12, 0)) is False
+
+
+def test_is_stale_bar_old_bar_while_closed_is_legit():
+    from app.market import is_stale_bar
+
+    # Piyasa kapaliyken son kapanis mesru veridir; bayat SAYILMAZ.
+    friday_close = _dt(2026, 7, 3, 18, 15)
+    assert is_stale_bar(friday_close, _dt(2026, 7, 5, 12, 0)) is False  # Pazar, kapali
+
+
+def test_is_stale_bar_accepts_utc_exchange_time():
+    from datetime import UTC, datetime
+
+    from app.market import is_stale_bar
+
+    # exchange_time UTC'de tutulur (Quote modeli); TR gunune donusturme
+    # dogru calismali (UTC 21:00 cuma = TR 00:00 cumartesi -> hala 03-07 gunu DEGIL,
+    # asagida acik ornek: UTC 03-07 15:15 = TR 03-07 18:15, dunku TR kapanisi).
+    yesterday_close_utc = datetime(2026, 7, 3, 15, 15, tzinfo=UTC)
+    assert is_stale_bar(yesterday_close_utc, _dt(2026, 7, 6, 12, 0)) is True

@@ -16,14 +16,16 @@ from app.providers.tradingview import (
     parse_quote,
 )
 
-# Kolon sirasi: ["lp","ch","chp","volume","open","high","low","prev_close_price"]
+# Kolon sirasi: ["lp","change_abs","change","volume","open","high","low","close"]
+# (prev_close_price kolonu /scan'de her zaman null geliyordu -- M1; previous_close
+# artik ayni yanittaki change_abs'den turetiliyor: price - change_abs.)
 _THYAO_ROW = {
     "s": "BIST:THYAO",
-    "d": [334.0, 0.75, 0.22, 44008702, 335.25, 335.75, 330.75, 333.25],
+    "d": [334.0, 0.75, 0.22, 44008702, 335.25, 335.75, 330.75, 334.0],
 }
 _GARAN_ROW = {
     "s": "BIST:GARAN",
-    "d": [128.5, -1.5, -1.15, 9000000, 130.0, 130.5, 128.0, 130.0],
+    "d": [128.5, -1.5, -1.15, 9000000, 130.0, 130.5, 128.0, 128.0],
 }
 
 
@@ -32,14 +34,16 @@ def _scan_payload(*rows):
 
 
 def test_parse_quote_falls_back_to_close_when_lp_null():
-    # Piyasa kapali: lp/ch/chp/prev null, ama close/open/high/low/volume dolu.
-    # Gercek yanit ornegi: {"s":"BIST:THYAO","d":[null,null,null,60645389,346,355.5,345.25,null,347.0]}
-    row = {"s": "BIST:THYAO", "d": [None, None, None, 60645389, 346, 355.5, 345.25, None, 347.0]}
+    # Piyasa kapali: lp/change_abs/change null, ama close/open/high/low/volume
+    # dolu. Gercek yanit ornegi (M1 denetimi): change_abs/change TradingView
+    # tarafindan bu durumda hep null geliyor -> previous_close de turetilemez.
+    row = {"s": "BIST:THYAO", "d": [None, None, None, 60645389, 346, 355.5, 345.25, 347.0]}
     q = parse_quote(row)
     assert q is not None
     assert q.price == 347.0  # close'a dustu
     assert q.volume == 60645389
     assert q.day_high == 355.5
+    assert q.previous_close is None  # change_abs yok -> turetilemedi, ACIKCA None
 
 
 def test_parse_quote_zero_volume_preserved():
@@ -61,10 +65,34 @@ def test_parse_quote_basic():
     assert q.open == 335.25
     assert q.day_high == 335.75
     assert q.day_low == 330.75
+    # previous_close artik prev_close_price kolonundan DEGIL, ayni yanittaki
+    # change_abs'den turetiliyor: price - change_abs = 334.0 - 0.75 = 333.25.
     assert q.previous_close == 333.25
     assert q.source == "tradingview"
     assert q.delayed is True
     assert q.updated_at is not None
+
+
+def test_parse_quote_derives_previous_close_from_change_abs():
+    # M1 fix: previous_close artik price - change_abs olarak hesaplanir
+    # (prev_close_price kolonu TradingView /scan'de calismiyordu).
+    row = {"s": "BIST:GARAN", "d": [128.5, -1.5, -1.15, 9000000, 130.0, 130.5, 128.0, 128.0]}
+    q = parse_quote(row)
+    assert q is not None
+    assert q.previous_close == 130.0  # 128.5 - (-1.5)
+
+
+def test_parse_quote_change_abs_null_leaves_previous_close_none(caplog):
+    # change_abs saglanmiyorsa previous_close BASKA BIR KAYNAKTAN turetilmez;
+    # acikca None birakilir + loglanir (sessiz eksiklik yerine gorunur eksiklik).
+    row = {"s": "BIST:THYAO", "d": [334.0, None, None, 1, 2, 3, 4, 334.0]}
+    with caplog.at_level("DEBUG", logger="app.providers.tradingview"):
+        q = parse_quote(row)
+    assert q is not None
+    assert q.previous_close is None
+    assert q.change is None
+    assert q.change_percent is None
+    assert any("previous_close" in r.message for r in caplog.records)
 
 
 def test_parse_quote_strips_bist_prefix():
@@ -80,7 +108,8 @@ def test_parse_quote_missing_fields_returns_none():
 
 
 def test_parse_quote_null_price_returns_none():
-    row = {"s": "BIST:THYAO", "d": [None, 0.75, 0.22, 1, 2, 3, 4, 5]}
+    # lp VE close ikisi de null -> fiyat hic elde edilemez.
+    row = {"s": "BIST:THYAO", "d": [None, 0.75, 0.22, 1, 2, 3, 4, None]}
     assert parse_quote(row) is None
 
 

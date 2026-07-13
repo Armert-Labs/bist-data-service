@@ -13,9 +13,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
 
 from . import metrics
 from .config import settings
+from .market import is_stale_bar
 from .models import HistoryResponse, Quote
 from .providers.base import CircuitBreaker, Provider
 from .providers.isyatirim import IsYatirimProvider
@@ -144,6 +146,7 @@ class Aggregator:
         self,
         symbols: list[str],
         previous: dict[str, float] | None = None,
+        now: datetime | None = None,
     ) -> dict[str, Quote]:
         mode = settings.provider_mode.lower()
         gapfill = mode in ("gapfill", "hybrid")
@@ -151,6 +154,7 @@ class Aggregator:
         rejected: dict[str, list[Quote]] = {}
         remaining = list(symbols)
         min_cov = settings.provider_min_coverage_pct / 100.0
+        moment = now or datetime.now(UTC)
 
         for provider, breaker in self._providers:
             if not remaining:
@@ -193,6 +197,22 @@ class Aggregator:
                     symbol_circuit.record_failure(provider.name, s)
                 logger.warning("%s fetch hatasi, sonraki kaynaga dusuluyor: %s", provider.name, exc)
                 continue
+
+            # H2: seans acikken bayat bar (dunku/eski veri noktasi) dondüren
+            # sembolleri "hic gelmemis" say -- provider Quote ÜRETMEMIS gibi
+            # davran, sonraki kaynaga (gapfill) dusulsun. Kapsama/circuit
+            # muhasebesi (asagida) bu filtrelenmis fetched'e gore hesaplanir.
+            for s in [s for s, q in fetched.items() if is_stale_bar(q.exchange_time, moment)]:
+                metrics.STALE_BAR_SKIPPED.labels(provider=provider.name).inc()
+                logger.warning(
+                    "%s bayat bar: sembol=%s exchange_time=%s (simdi=%s, seans acik) — "
+                    "quote atlandi",
+                    provider.name,
+                    s,
+                    fetched[s].exchange_time,
+                    moment.isoformat(),
+                )
+                del fetched[s]
 
             if self._coverage_ok(fetched, ask):
                 breaker.record_success()

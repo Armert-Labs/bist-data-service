@@ -8,6 +8,16 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
 ## [Yayınlanmamış]
 
 ### Eklendi
+- `Quote.data_age_seconds` + `Quote.stale` — her okumada (exchange_time varsa
+  ondan, yoksa updated_at'ten) hesaplanan per-sembol tazelik alanları
+  (`/quote`, `/quotes`, `/all`, `/stream`'de; geriye uyumlu ek alanlar)
+- `bist_quotes_by_source{source}` gauge — her güncelleme turunda kaynak başına
+  yazılan quote sayısı (failover'ı sessizlikten çıkarır)
+- `bist_stale_bar_skipped_total{provider}` counter — bayat-bar guard'ının
+  (aşağıya bakın) devreye girdiği sayı
+- `docker-compose.yml`'de updater metrik portu (`8001`) artık `ports` ile
+  host'a publish ediliyor (önceden yalnızca `expose`; VM140 Prometheus'u
+  compose ağı dışından scrape edemiyordu)
 - Modern paketleme (`pyproject.toml`), ruff + mypy + pre-commit
 - MIT lisansı, SECURITY / CONTRIBUTING / CODE_OF_CONDUCT
 - GitHub şablonları (issue/PR), Dependabot, CODEOWNERS
@@ -45,6 +55,30 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
   `_opened_at` (tek seferlik/typo sembol sorguları kalıcı "kapalı" kayıt bırakıyordu) ve
   `MemoryStore._history_cache` (sembol×period×interval kombinasyonları hiç temizlenmiyordu).
   İkisi de artık 4096 kayıt tavanına sahip.
+- **Veri-doğruluk hardening (13 Tem denetimi, H2/H3/M1):**
+  - **Bayat-bar guard (H2):** Seans içi denetimde İş Yatırım'ın seans açıkken
+    dünkü kapanışı `updated_at=şimdi` damgasıyla "canlı fiyat" gibi sunduğu
+    tespit edildi (`exchange_time=None` olduğu için hiçbir mekanizma bunu
+    yakalamıyordu). Fix: İş Yatırım artık son günlük çubuğun tarihini
+    `exchange_time`'a taşıyor; `market.is_stale_bar()` yeni genel kuralı,
+    seans açıkken bugüne ait olmayan bir `exchange_time`'a dayanan quote'u
+    "hiç gelmemiş" sayıp aggregator'da bir sonraki kaynağa düşürüyor (kapalı
+    seansta son kapanış zaten meşru veri, guard devreye girmiyor).
+  - **Çapraz-doğrulama totolojisi (H3):** `cross_validate_quotes` referans
+    seçerken artık quote'un KENDİ kaynağını yapısal olarak dışlıyor (config'e
+    bağlı değil) — önceden `PROVIDERS[0] == VALIDATE_PROVIDERS[0]` olduğunda
+    kaynak kendi kendini doğrulayıp sahte `consistent:true` üretebiliyordu.
+    Bağımsız referans yoksa (hepsi kendi kaynağı/bayat/erişilemez) sessizce
+    "doğrulanamadı" sayılır (fail-quiet, sahte red/alarm üretilmez); aynı
+    kural drift monitörü ve H2 guard'ı için de geçerli.
+  - **TradingView türetilmiş alanlar (M1):** `previous_close`/`change`/
+    `change_percent` TradingView `/scan`'de evrensel olarak `null` geliyordu;
+    kök neden `ch`/`chp`/`prev_close_price` kolon adlarının desteklenmemesi
+    (varsayım — canlıda henüz doğrulanmadı, sonraki canlı denetimde teyit
+    edilmeli). `change_abs`/`change` kolonlarına geçildi; `previous_close`
+    artık aynı yanıttaki `change_abs`'den türetiliyor (`price - change_abs`),
+    başka bir kaynağa gidilmiyor. `change_abs` de boşsa alan açıkça `None`
+    bırakılır + loglanır.
 
 ## [0.1.0] - 2026-07-05
 

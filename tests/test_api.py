@@ -380,6 +380,70 @@ def test_validate_symbol_limit_exceeded_rejected(override_settings):
         assert "5" in r.json()["detail"]
 
 
+def test_quote_reports_stale_when_open_and_old(monkeypatch, override_settings):
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Quote
+    from app.store import get_store
+
+    override_settings(staleness_seconds=300)
+    monkeypatch.setattr("app.main.market_state", lambda: "OPEN")
+    store = get_store()
+    old = datetime.now(UTC) - timedelta(seconds=1000)
+    store._quotes = {"THYAO": Quote(symbol="THYAO", price=100.0, updated_at=old)}
+    store._last_update = old
+    with TestClient(app) as c:
+        body = c.get("/quote/THYAO").json()
+        assert body["stale"] is True
+        assert body["data_age_seconds"] > 900
+
+
+def test_quote_not_stale_when_market_closed_even_if_old(monkeypatch, override_settings):
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Quote
+    from app.store import get_store
+
+    override_settings(staleness_seconds=300)
+    monkeypatch.setattr("app.main.market_state", lambda: "CLOSED")
+    store = get_store()
+    old = datetime.now(UTC) - timedelta(seconds=10000)
+    store._quotes = {"THYAO": Quote(symbol="THYAO", price=100.0, updated_at=old)}
+    store._last_update = old
+    with TestClient(app) as c:
+        body = c.get("/quote/THYAO").json()
+        # Kapali seansta son kapanis mesru veridir; ne kadar eski olursa olsun
+        # bayat SAYILMAZ (README felsefesiyle tutarli).
+        assert body["stale"] is False
+
+
+def test_quote_fresh_when_recently_updated(monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    monkeypatch.setattr("app.main.market_state", lambda: "OPEN")
+    store = get_store()
+    now = datetime.now(UTC)
+    store._quotes = {"THYAO": Quote(symbol="THYAO", price=100.0, updated_at=now)}
+    store._last_update = now
+    with TestClient(app) as c:
+        body = c.get("/quote/THYAO").json()
+        assert body["stale"] is False
+        assert body["data_age_seconds"] < 5
+
+
+def test_all_quotes_report_data_age_seconds():
+    _seed_store()
+    with TestClient(app) as c:
+        body = c.get("/all").json()
+        for q in body["quotes"]:
+            assert q["data_age_seconds"] is not None
+            assert q["data_age_seconds"] < 5
+            assert q["stale"] is False
+
+
 def test_validate_threshold_from_settings(monkeypatch, override_settings):
     from app.models import Quote
 

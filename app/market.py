@@ -10,7 +10,7 @@ ISO tarihler, orn. "2026-10-29,2027-01-01"). Liste bos ise yalnizca hafta ici
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 
 from .config import settings
 
@@ -68,3 +68,30 @@ def seconds_since_open(now: datetime | None = None) -> float | None:
 
 def market_state(now: datetime | None = None) -> str:
     return "OPEN" if is_market_open(now) else "CLOSED"
+
+
+def is_stale_bar(exchange_time: datetime | None, now: datetime | None = None) -> bool:
+    """Seans ACIKKEN bir veri noktasi (exchange_time) bugune ait degilse True.
+
+    Provider'lar (orn. Is Yatirim) gunluk EOD cubuk dondurur; seans icinde
+    dunku/daha eski bir cubugu "canli fiyat" gibi sunmak yaniltici olur (bkz.
+    H2: dunku kapanis, guncel updated_at damgasiyla servis edilmis olabiliyordu).
+    exchange_time yoksa (kaynak saglamiyor) veya market kapaliysa (o an son
+    kapanis zaten mesru veridir) bayat SAYILMAZ.
+    """
+    if exchange_time is None:
+        return False
+    if not is_market_open(now):
+        return False
+    bar_date = exchange_time.astimezone(TR_TZ).date()
+    return bar_date < _to_tr(now).date()
+
+
+def market_close_time(day: date) -> datetime:
+    """Verilen gunun BIST kapanis anini UTC olarak doner.
+
+    Gunluk EOD cubuk dondüren kaynaklarin (orn. Is Yatirim) tek kapanis
+    fiyatini Quote.exchange_time'da ifade edebilmesi icin kullanilir.
+    """
+    closing = datetime.combine(day, time(settings.market_close_hour, settings.market_close_minute))
+    return closing.replace(tzinfo=TR_TZ).astimezone(UTC)

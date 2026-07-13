@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections import defaultdict
 
 from . import metrics
 from . import symbols as sym
@@ -44,6 +45,7 @@ class BackgroundUpdater:
         previous = {s: q.price for s, q in current.items() if q.price is not None}
 
         total = 0
+        source_counts: dict[str, int] = defaultdict(int)
         started = time.monotonic()
         batch_size = max(1, settings.batch_size)
 
@@ -57,12 +59,18 @@ class BackgroundUpdater:
                 for s, q in quotes.items():
                     if q.price is not None:
                         previous[s] = q.price
+                    source_counts[q.source] += 1
                 total += len(quotes)
             await asyncio.sleep(settings.batch_pause)
 
         duration = time.monotonic() - started
         metrics.UPDATE_DURATION.observe(duration)
         metrics.UPDATE_SYMBOLS.set(total)
+        # Bilinen (yapilandirilmis) tum kaynaklari raporla -- bu turde hic isabet
+        # almayan kaynak eski nonzero degerde TAKILI KALMASIN (failover'i gizler).
+        known_sources = set(aggregator.provider_states) | set(source_counts)
+        for name in known_sources:
+            metrics.QUOTES_BY_SOURCE.labels(source=name).set(source_counts.get(name, 0))
         with contextlib.suppress(Exception):
             metrics.QUOTES_CACHED.set(await self._store.size())
         logger.info(
