@@ -4,7 +4,7 @@ Gercek Is Yatirim `value[]` response formatiyla parse_quote'u dogrular.
 Boylece kodun dogrulugu, ag erisiminden bagimsiz olarak kanitlanir.
 """
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 import httpx
 import respx
@@ -101,6 +101,26 @@ def test_parse_quote_unparseable_date_not_picked_as_latest():
     ]
     q = parse_quote("XU", rows)
     assert q.price == 110.0  # 07-07, bozuk-tarihli 999.0 degil
+
+
+def test_parse_quote_clamps_future_exchange_time_to_now():
+    # MEDIUM-2: bar BUGUNE ait ve seans devam ediyorsa (henuz kapanis saati
+    # gelmedi), market_close_time GELECEK bir damga uretir -- bu, okuma
+    # aninda hesaplanan data_age_seconds'i negatif yapardi. exchange_time
+    # "simdi"yi asamaz; en fazla "simdi" kadar guncel olabilir.
+    rows = [{"HGDG_TARIH": "13-07-2026", "HGDG_KAPANIS": 100.0}]
+    now = datetime(2026, 7, 13, 11, 0, tzinfo=UTC)  # TR 14:00 -- kapanistan (18:15) ONCE
+    q = parse_quote("THYAO", rows, now=now)
+    assert q is not None
+    assert q.exchange_time == now
+
+
+def test_parse_quote_does_not_clamp_past_exchange_time():
+    rows = [{"HGDG_TARIH": "10-07-2026", "HGDG_KAPANIS": 100.0}]
+    now = datetime(2026, 7, 13, 11, 0, tzinfo=UTC)
+    q = parse_quote("THYAO", rows, now=now)
+    assert q is not None
+    assert q.exchange_time < now  # gercek kapanis zamani, klemplenmedi
 
 
 @respx.mock

@@ -16,16 +16,18 @@ from app.providers.tradingview import (
     parse_quote,
 )
 
-# Kolon sirasi: ["lp","change_abs","change","volume","open","high","low","close"]
+# Kolon sirasi: ["lp","change_abs","change","volume","open","high","low","close","time"]
 # (prev_close_price kolonu /scan'de her zaman null geliyordu -- M1; previous_close
-# artik ayni yanittaki change_abs'den turetiliyor: price - change_abs.)
+# artik ayni yanittaki change_abs'den turetiliyor: price - change_abs. `time`
+# review'da (HIGH-1) bar'in gercek zamanini verdigi canli olarak dogrulandi.)
+_THYAO_EPOCH = 1783922400  # 13 Tem 2026 (review kanit ornegi)
 _THYAO_ROW = {
     "s": "BIST:THYAO",
-    "d": [334.0, 0.75, 0.22, 44008702, 335.25, 335.75, 330.75, 334.0],
+    "d": [334.0, 0.75, 0.22, 44008702, 335.25, 335.75, 330.75, 334.0, _THYAO_EPOCH],
 }
 _GARAN_ROW = {
     "s": "BIST:GARAN",
-    "d": [128.5, -1.5, -1.15, 9000000, 130.0, 130.5, 128.0, 128.0],
+    "d": [128.5, -1.5, -1.15, 9000000, 130.0, 130.5, 128.0, 128.0, _THYAO_EPOCH],
 }
 
 
@@ -34,9 +36,10 @@ def _scan_payload(*rows):
 
 
 def test_parse_quote_falls_back_to_close_when_lp_null():
-    # Piyasa kapali: lp/change_abs/change null, ama close/open/high/low/volume
-    # dolu. Gercek yanit ornegi (M1 denetimi): change_abs/change TradingView
-    # tarafindan bu durumda hep null geliyor -> previous_close de turetilemez.
+    # HIGH-1 review kaniti: lp bu /scan uc noktasinda SEANS ACIKKEN DE null
+    # geliyor (yalniz "piyasa kapali" degil) -- TV fiilen hep close alanini
+    # dolduruyor, price bu yuzden ona dusuyor. change_abs/change de bu
+    # durumda hep null geliyor -> previous_close turetilemez.
     row = {"s": "BIST:THYAO", "d": [None, None, None, 60645389, 346, 355.5, 345.25, 347.0]}
     q = parse_quote(row)
     assert q is not None
@@ -71,6 +74,19 @@ def test_parse_quote_basic():
     assert q.source == "tradingview"
     assert q.delayed is True
     assert q.updated_at is not None
+    # HIGH-1: `time` kolonu bar'in gercek zamanini verir; guard (is_stale_bar)
+    # bu kaynak icin de calisabilsin diye exchange_time'a tasinmali.
+    assert q.exchange_time is not None
+    assert int(q.exchange_time.timestamp()) == _THYAO_EPOCH
+
+
+def test_parse_quote_missing_time_leaves_exchange_time_none():
+    # `time` saglanmiyorsa exchange_time acikca None kalir (baska bir alandan
+    # tahmin edilmez).
+    row = {"s": "BIST:THYAO", "d": [334.0, 0.75, 0.22, 1, 2, 3, 4, 334.0]}
+    q = parse_quote(row)
+    assert q is not None
+    assert q.exchange_time is None
 
 
 def test_parse_quote_derives_previous_close_from_change_abs():

@@ -309,6 +309,38 @@ def test_all_etag_304():
         assert r2.content == b""
 
 
+def test_all_etag_stable_despite_data_age_drift(override_settings, monkeypatch):
+    """LOW-a: data_age_seconds okuma aninda surekli degistigi icin ETag'i
+    dogrudan govde hash'inden turetmek 304 yolunu oldururdu (fiyat AYNI kalsa
+    bile her yeniden hesaplamada ETag degisirdi). ETag yalnizca 'gercek' veriden
+    (yas alanlari haric) turetilmeli."""
+    from datetime import UTC, timedelta
+    from datetime import datetime as real_datetime
+
+    override_settings(all_cache_ttl=0.0)  # cache'i devre disi birak, HER istek yeniden hesaplasin
+    _seed_store()
+
+    calls = {"n": 0}
+    base = real_datetime(2026, 7, 13, 10, 0, 0, tzinfo=UTC)
+
+    class FakeDateTime:
+        @staticmethod
+        def now(tz=None):
+            calls["n"] += 1
+            return base + timedelta(seconds=calls["n"] * 60)
+
+    monkeypatch.setattr("app.main.datetime", FakeDateTime)
+    with TestClient(app) as c:
+        r1 = c.get("/all")
+        etag1 = r1.headers["etag"]
+        age1 = r1.json()["quotes"][0]["data_age_seconds"]
+        r2 = c.get("/all")
+        etag2 = r2.headers["etag"]
+        age2 = r2.json()["quotes"][0]["data_age_seconds"]
+    assert age1 != age2  # "saat" gercekten ilerledi, yeniden hesaplandi
+    assert etag1 == etag2  # ama ETag SABIT kaldi (fix)
+
+
 def test_all_gzip_encoding():
     from datetime import UTC, datetime
 
@@ -432,6 +464,27 @@ def test_quote_fresh_when_recently_updated(monkeypatch):
         body = c.get("/quote/THYAO").json()
         assert body["stale"] is False
         assert body["data_age_seconds"] < 5
+
+
+def test_quote_data_age_never_negative_for_future_exchange_time(monkeypatch):
+    # MEDIUM-2: exchange_time (orn. isyatirim'in kapanis-zamani tahmini) saat
+    # kaymasi/klemp bosluğu nedeniyle "simdi"den ileride kalirsa data_age_seconds
+    # negatif GORUNMEMELI (klemplenir).
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Quote
+    from app.store import get_store
+
+    monkeypatch.setattr("app.main.market_state", lambda: "OPEN")
+    store = get_store()
+    future = datetime.now(UTC) + timedelta(seconds=120)
+    store._quotes = {
+        "THYAO": Quote(symbol="THYAO", price=100.0, exchange_time=future, updated_at=future)
+    }
+    store._last_update = future
+    with TestClient(app) as c:
+        body = c.get("/quote/THYAO").json()
+        assert body["data_age_seconds"] >= 0
 
 
 def test_all_quotes_report_data_age_seconds():

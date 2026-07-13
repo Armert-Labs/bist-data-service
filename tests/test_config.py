@@ -104,6 +104,19 @@ def test_max_symbols_per_request_env_override(monkeypatch):
     assert Settings().max_symbols_per_request == 50
 
 
+def test_validate_providers_default_includes_tradingview(monkeypatch):
+    """HIGH-2 regresyon guard: eski varsayim [yahoo_chart, isyatirim] idi --
+    birincil yahoo_chart'tan gelince tek olasi bagimsiz referans isyatirim
+    kalirdi; isyatirim seans icinde H2 bayat-bar guard'i yuzunden elenince
+    dogrulama TAMAMEN olu kaliyordu. tradingview (artik exchange_time
+    sagliyor -- HIGH-1) bu tekli-referans riskini gideriyor."""
+    from app.config import Settings
+
+    monkeypatch.delenv("VALIDATE_PROVIDERS", raising=False)
+    cfg = Settings()
+    assert cfg.validate_providers == ["yahoo_chart", "tradingview", "isyatirim"]
+
+
 def test_default_providers_excludes_yahoo_from_live_chain(monkeypatch):
     """yahoo (yfinance/curl_cffi crumb wedge riski) varsayilan zincirden cikarildi;
     yahoo_chart onceki yerini alir. Provider sinifi hala PROVIDERS env'i ile geri

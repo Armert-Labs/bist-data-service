@@ -56,7 +56,7 @@ def _parse_date(value) -> datetime | None:
         return None
 
 
-def parse_quote(bist_symbol: str, rows: list[dict]) -> Quote | None:
+def parse_quote(bist_symbol: str, rows: list[dict], now: datetime | None = None) -> Quote | None:
     """value[] satirlarindan Quote uretir. AGSIZ; test edilebilir saf fonksiyon."""
     rows = [r for r in (rows or []) if _f(r.get("HGDG_KAPANIS")) is not None]
     if not rows:
@@ -84,7 +84,8 @@ def parse_quote(bist_symbol: str, rows: list[dict]) -> Quote | None:
     # tasinmazsa seans-ici bayat-bar guard'i (market.is_stale_bar) bu kaynak icin
     # hicbir zaman devreye giremez (exchange_time=None her zaman "taze" sayilir).
     last_date = _parse_date(last.get("HGDG_TARIH"))
-    exchange_time = market_close_time(last_date.date()) if last_date else None
+    moment = now or datetime.now(UTC)
+    exchange_time = min(market_close_time(last_date.date()), moment) if last_date else None
 
     return Quote(
         symbol=bist_symbol,
