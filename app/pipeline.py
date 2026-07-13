@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from . import metrics
 from .aggregator import aggregator
 from .config import settings
-from .market import market_state
+from .market import is_stale_bar, market_state
 from .models import Quote
 from .store import Store
 
@@ -34,33 +34,58 @@ DRIFT_MONITOR_SYMBOLS = [
 ]
 
 
-async def cross_validate_quotes(quotes: dict[str, Quote]) -> dict[str, Quote]:
+def _pick_reference(
+    symbol: str,
+    own_source: str,
+    provider_quotes: dict[str, dict[str, Quote]],
+    now: datetime,
+) -> Quote | None:
+    """Ilk-kazanir sirayla bagimsiz referans secer.
+
+    Quote'un KENDI kaynagi asla referans olarak secilmez (H3: totolojik
+    dogrulama -- ayni kaynagin yeni bir cagrisi hemen hemen hep ayni fiyati
+    dondurur, bu da sahte "tutarli" gorunumu verir). Bayat bar dondüren
+    kaynaklar da elenir (H2 guard'i referans yolunda da gecerli).
+    """
+    for name in settings.validate_providers:
+        if name == own_source:
+            continue
+        candidate = provider_quotes.get(name, {}).get(symbol)
+        if candidate is None:
+            continue
+        if is_stale_bar(candidate.exchange_time, now):
+            continue
+        return candidate
+    return None
+
+
+async def cross_validate_quotes(
+    quotes: dict[str, Quote], now: datetime | None = None
+) -> dict[str, Quote]:
     """Birincil fiyatlari bagimsiz referans kaynaklarla karsilastirir."""
     if not quotes or not settings.write_cross_validate:
         return quotes
 
     syms = list(quotes.keys())
-    reference: dict[str, Quote] = {}
+    moment = now or datetime.now(UTC)
+    provider_quotes: dict[str, dict[str, Quote]] = {}
     for name in settings.validate_providers:
         provider = aggregator.get_provider(name)
         if provider is None:
             continue
         try:
-            fetched = await asyncio.wait_for(provider.fetch_quotes(syms), timeout=8.0)
-            for s, q in fetched.items():
-                if s not in reference:
-                    reference[s] = q
+            provider_quotes[name] = await asyncio.wait_for(provider.fetch_quotes(syms), timeout=8.0)
         except Exception as exc:
             logger.debug("Capraz-dogrulama kaynagi %s erisilemedi: %s", name, exc)
-
-    if not reference:
-        return quotes
 
     out: dict[str, Quote] = {}
     max_pct = settings.cross_validate_max_pct
     for s, q in quotes.items():
-        ref = reference.get(s)
+        ref = _pick_reference(s, q.source, provider_quotes, moment)
         if ref is None or ref.price is None or q.price is None or ref.price == 0:
+            # Dogrulanamadi: bagimsiz referans yok (hepsi kendi kaynagi, bayat
+            # veya erisilemez) -- SESSIZCE gecerli kabul edilir (fail-quiet;
+            # bunu reddetmek fiyatin yanlis oldugu anlamina gelmez).
             out[s] = q
             continue
         dev = abs(q.price - ref.price) / ref.price * 100.0
@@ -69,10 +94,12 @@ async def cross_validate_quotes(quotes: dict[str, Quote]) -> dict[str, Quote]:
         else:
             metrics.WRITE_VALIDATE_REJECTS.inc()
             logger.warning(
-                "Yazma capraz-dogrulama reddi %s: primary=%.4f ref=%.4f (%%%.2f)",
+                "Yazma capraz-dogrulama reddi %s: primary=%.4f (%s) ref=%.4f (%s) (%%%.2f)",
                 s,
                 q.price,
+                q.source,
                 ref.price,
+                ref.source,
                 dev,
             )
     return out
@@ -131,9 +158,12 @@ async def fetch_and_commit(
     return quotes
 
 
-async def run_drift_monitor(store: Store, symbols: list[str] | None = None) -> dict:
+async def run_drift_monitor(
+    store: Store, symbols: list[str] | None = None, now: datetime | None = None
+) -> dict:
     """Arka planda kaynaklar arasi sapma kontrolu (updater dongusu icin)."""
     syms = symbols or settings.drift_monitor_symbols or DRIFT_MONITOR_SYMBOLS
+    moment = now or datetime.now(UTC)
     primary = await store.get_quotes(syms)
     missing = [s for s in syms if s not in primary]
     if missing:
@@ -156,7 +186,11 @@ async def run_drift_monitor(store: Store, symbols: list[str] | None = None) -> d
             except Exception:
                 continue
             r = ref.get(s)
-            rp = r.price if r else None
+            # H2 guard'i burada da gecerli: bayat bar dondüren referans
+            # karsilastirmaya katilmaz (sahte drift alarmi uretmesin).
+            if r is None or is_stale_bar(r.exchange_time, moment):
+                continue
+            rp = r.price
             if rp is not None and rp != 0:
                 dev = abs(pp - rp) / rp * 100.0
                 max_dev = max(max_dev, dev)

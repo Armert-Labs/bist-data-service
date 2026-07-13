@@ -1,12 +1,21 @@
 """Aggregator testleri: failover, sanity-check, circuit breaker (fake provider'larla)."""
 
 import asyncio
+from datetime import UTC, datetime
 
 import app.aggregator as aggregator_module
 import pytest
+from app import metrics
 from app.aggregator import Aggregator
 from app.models import HistoryResponse, Quote
 from app.providers.base import CircuitBreaker, Provider
+
+# 2026-07-06 Pazartesi, seans ici (TR 12:00 = UTC 09:00).
+_OPEN_NOW = datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
+_TODAY_BAR = datetime(2026, 7, 6, 8, 0, tzinfo=UTC)
+_YESTERDAY_BAR = datetime(2026, 7, 3, 15, 15, tzinfo=UTC)  # Cuma kapanisi (UTC)
+# 2026-07-05 Pazar -- market kapali (hafta sonu), bar'in tazeligi kural disi.
+_CLOSED_NOW = datetime(2026, 7, 5, 9, 0, tzinfo=UTC)
 
 
 class FakeClock:
@@ -328,6 +337,60 @@ async def test_history_timeout_outer_cancel_does_not_record_failure(override_set
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(agg.fetch_history("THYAO", "1mo", "1d"), timeout=0.05)
     assert breaker._failures == 0
+
+
+async def test_stale_bar_rejected_while_market_open_falls_back():
+    # H2: seans acikken dunku bar'a dayanan quote (exchange_time=dun) kabul
+    # edilmemeli; sonraki kaynaga (gapfill) dusulmeli.
+    stale = FakeProvider(
+        "isyatirim",
+        {"THYAO": Quote(symbol="THYAO", price=344.5, exchange_time=_YESTERDAY_BAR)},
+    )
+    fresh = FakeProvider(
+        "yahoo_chart",
+        {
+            "THYAO": Quote(
+                symbol="THYAO", price=336.75, exchange_time=_TODAY_BAR, source="yahoo_chart"
+            )
+        },
+    )
+    agg = _agg([stale, fresh])
+    before = metrics.STALE_BAR_SKIPPED.labels(provider="isyatirim")._value.get()
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 336.75
+    assert res["THYAO"].source == "yahoo_chart"
+    after = metrics.STALE_BAR_SKIPPED.labels(provider="isyatirim")._value.get()
+    assert after == before + 1
+
+
+async def test_stale_bar_accepted_when_market_closed():
+    # Seans kapaliyken son kapanis mesru veridir; bayat-bar guard'i devreye girmez.
+    prov = FakeProvider(
+        "isyatirim",
+        {"THYAO": Quote(symbol="THYAO", price=344.5, exchange_time=_YESTERDAY_BAR)},
+    )
+    agg = _agg([prov])
+    res = await agg.fetch_quotes(["THYAO"], now=_CLOSED_NOW)
+    assert res["THYAO"].price == 344.5
+
+
+async def test_todays_bar_accepted_while_market_open():
+    prov = FakeProvider(
+        "isyatirim",
+        {"THYAO": Quote(symbol="THYAO", price=336.75, exchange_time=_TODAY_BAR)},
+    )
+    agg = _agg([prov])
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 336.75
+
+
+async def test_stale_bar_without_exchange_time_not_filtered():
+    # exchange_time saglamayan kaynak (orn. TradingView) icin bu kural
+    # uygulanamaz -- guard'siz gecer.
+    prov = FakeProvider("tradingview", {"THYAO": Quote(symbol="THYAO", price=1.0)})
+    agg = _agg([prov])
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 1.0
 
 
 async def test_history_skips_non_history_provider_and_keeps_quotes():

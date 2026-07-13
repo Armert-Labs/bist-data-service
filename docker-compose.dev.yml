@@ -6,8 +6,8 @@ services:
   updater:
     volumes:
       - ./webhooks.json:/app/webhooks.json:ro
-    ports:
-      - "8001:8001"
+    # NOT: 8001:8001 artik base docker-compose.yml'de publish ediliyor (H1);
+    # burada tekrarlanirsa duplicate port binding riski olusur.
     environment:
       - WEBHOOKS_ENABLED=true
       - WEBHOOKS_CONFIG=/app/webhooks.json

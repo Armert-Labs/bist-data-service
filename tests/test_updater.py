@@ -4,6 +4,7 @@ import asyncio
 
 import app.symbols as sym_mod
 import app.updater as updater_mod
+from app import metrics
 from app.models import Quote
 from app.store import MemoryStore
 from app.updater import BackgroundUpdater
@@ -52,6 +53,59 @@ async def test_update_once_passes_previous_for_sanity(monkeypatch):
     up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
     await up._update_once()
     assert seen_previous.get("THYAO") == 100.0
+
+
+async def test_update_once_reports_quotes_by_source(monkeypatch):
+    """Item 4: kaynak-dagilim metrigi -- failover'i sessizlikten cikarir."""
+    store = MemoryStore()
+    await store.connect()
+
+    async def fake_fetch(symbols, previous=None):
+        return {
+            "THYAO": Quote(symbol="THYAO", price=100.0, source="yahoo_chart"),
+            "GARAN": Quote(symbol="GARAN", price=50.0, source="isyatirim"),
+        }
+
+    async def no_sleep(*a, **k):
+        return None
+
+    monkeypatch.setattr(updater_mod.aggregator, "fetch_quotes", fake_fetch)
+    monkeypatch.setattr(updater_mod.asyncio, "sleep", no_sleep)
+
+    up = BackgroundUpdater(symbols_list=["THYAO", "GARAN"], store=store)
+    await up._update_once()
+
+    assert metrics.QUOTES_BY_SOURCE.labels(source="yahoo_chart")._value.get() == 1
+    assert metrics.QUOTES_BY_SOURCE.labels(source="isyatirim")._value.get() == 1
+
+
+async def test_update_once_zeroes_out_source_with_no_hits_this_cycle(monkeypatch):
+    """Bir kaynak bu tur hic sembol saglamadiysa gauge 0'a dusmeli -- eski
+    nonzero deger SESSIZCE kalici olmamali (failover'i gizler)."""
+    store = MemoryStore()
+    await store.connect()
+
+    calls = {"n": 0}
+
+    async def fake_fetch(symbols, previous=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {s: Quote(symbol=s, price=1.0, source="isyatirim") for s in symbols}
+        return {s: Quote(symbol=s, price=1.0, source="yahoo_chart") for s in symbols}
+
+    async def no_sleep(*a, **k):
+        return None
+
+    monkeypatch.setattr(updater_mod.aggregator, "fetch_quotes", fake_fetch)
+    monkeypatch.setattr(updater_mod.asyncio, "sleep", no_sleep)
+
+    up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
+    await up._update_once()
+    assert metrics.QUOTES_BY_SOURCE.labels(source="isyatirim")._value.get() == 1
+
+    await up._update_once()
+    assert metrics.QUOTES_BY_SOURCE.labels(source="isyatirim")._value.get() == 0
+    assert metrics.QUOTES_BY_SOURCE.labels(source="yahoo_chart")._value.get() == 1
 
 
 async def test_run_cycle_times_out_and_recovers(monkeypatch, override_settings):

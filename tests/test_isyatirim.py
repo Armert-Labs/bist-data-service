@@ -4,6 +4,8 @@ Gercek Is Yatirim `value[]` response formatiyla parse_quote'u dogrular.
 Boylece kodun dogrulugu, ag erisiminden bagimsiz olarak kanitlanir.
 """
 
+from datetime import UTC
+
 import httpx
 import respx
 from app.providers.isyatirim import IsYatirimProvider, parse_quote
@@ -44,6 +46,11 @@ def test_parse_quote_basic():
     assert q.volume == 1200000
     assert q.source == "isyatirim"
     assert q.delayed is True
+    # H2: son bar'in tarihi (HGDG_TARIH) exchange_time'a tasinmali -- aksi halde
+    # seans-ici bayat-bar guard'i (is_stale_bar) bu kaynak icin hicbir zaman
+    # devreye giremez (exchange_time=None her zaman "taze" sayilirdi).
+    assert q.exchange_time is not None
+    assert q.exchange_time.astimezone(UTC).date().isoformat() == "2026-07-02"
 
 
 def test_parse_quote_empty_returns_none():
@@ -82,6 +89,7 @@ def test_parse_quote_sorts_unordered_rows_by_date():
     q = parse_quote("GARAN", scrambled)
     assert q.price == 134.4  # 07-07 kapanisi (rows[-1]=29-06=137.3 DEGIL)
     assert q.previous_close == 133.7  # 06-07 kapanisi (tarihe gore bir onceki)
+    assert q.exchange_time.astimezone(UTC).date().isoformat() == "2026-07-07"
 
 
 def test_parse_quote_unparseable_date_not_picked_as_latest():
