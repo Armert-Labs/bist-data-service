@@ -50,13 +50,16 @@ flowchart LR
 ### 🕰️ Seans-içi kaynak zinciri gerçeği + bayat-veri düşürme politikası
 
 **İş Yatırım günlük EOD (End-Of-Day) çubuk döndürür** — gün içinde birden fazla
-kez sorgulansa da her seferinde *aynı günün* tek kapanış fiyatını verir. Seans
-**açıkken** bu artık kabul edilmez: her quote'un dayandığı veri noktası
-(`exchange_time`) bugüne ait değilse (piyasa açıkken) kaynak o sembol için
-**"hiç veri dönmemiş"** sayılır ve fallback zincirinde bir sonraki kaynağa
-düşülür (`bist_stale_bar_skipped_total`). Aynı kural, `exchange_time`
-**üretemeyen** bir kaynak için de geçerlidir (`bist_missing_exchange_time_total`)
-— damgasız veri seans içinde güvenilmez kabul edilir.
+kez sorgulansa da her seferinde *aynı günün* tek kapanış fiyatını verir.
+**TradingView** de bar-bazlı çalışır (`time` alanı bar-açılış anıdır, gerçek
+işlem anı değil). Seans **açıkken** bu artık kabul edilmez: her quote'un
+dayandığı bar'ın günü (`bar_time`; sağlamıyorsa `exchange_time`) bugüne ait
+değilse (piyasa açıkken) kaynak o sembol için **"hiç veri dönmemiş"** sayılır
+ve fallback zincirinde bir sonraki kaynağa düşülür (`bist_stale_bar_skipped_total`).
+Aynı kural, **hiçbir zaman damgası** (ne `bar_time` ne `exchange_time`)
+üretemeyen bir kaynak için de geçerlidir (`bist_missing_exchange_time_total`)
+— damgasız veri seans içinde güvenilmez kabul edilir. `exchange_time` ve
+`bar_time` farklı amaçlara hizmet eder — bkz. Quote şeması tablosu.
 
 Pratik sonucu: **seans içinde fiili canlı-fiyat zinciri `yahoo_chart` +
 `tradingview`'dir** — İş Yatırım yalnızca **piyasa kapalıyken** (son kapanış
@@ -64,6 +67,16 @@ meşru veridir) devreye girer. Bu, bilinçli bir tasarım kararıdır (sessizce
 bayat fiyat servis etmek yerine açıkça düşürmek); `/ready`'deki `providers`
 durumu "sağlıklı" görünse bile bir sembolün seans içinde İş Yatırım'dan hiç
 veri gelmiyor olması **beklenen** davranıştır.
+
+Bir kaynak **ardışık `GUARD_COOLDOWN_FAIL_THRESHOLD` (vars. 3) turda** yukarıdaki
+guard'lar yüzünden isteğinin **tamamını** kaybederse (yapısal olarak taze veri
+üretemiyor demektir — örn. gerçek bir arıza değil, seans-içi EOD/bar
+kısıtı) provider-seviyesinde `GUARD_COOLDOWN_SECONDS` (vars. 1800 sn) süreyle
+geçici olarak devre dışı bırakılır (`bist_provider_guard_cooldown{provider}`
+gauge=1) — aksi halde sembol devre kesici bu düşüşleri saymadığı için
+(bilinçli tasarım) kaynak sonsuza kadar boşuna sorgulanmaya devam ederdi. En
+az bir quote geçtiğinde ardışık sayaç sıfırlanır; cooldown bitince kaynak
+yeniden denenir.
 
 ---
 
@@ -602,8 +615,9 @@ Quote nesnesindeki alanlar (`/quote`, `/quotes`, `/all`, `/stream` içinde aynı
 | `source` | string | Fiyatı sağlayan kaynak (`yahoo_chart`, `isyatirim`, …) |
 | `delayed` | bool | BIST için **her zaman `true`** (gerçek-zamanlı değil) |
 | `updated_at` | ISO-8601 UTC | Servisin cache'e **yazım anı** (veri tazeliği bununla ölçülür) |
-| `exchange_time` | ISO-8601 UTC \| null | Borsadaki **gerçek işlem zamanı** (kaynak sağlarsa) |
-| `data_age_seconds` | number \| null | `exchange_time` (varsa) veya `updated_at`'ten bu yana geçen süre (sn); **okuma anında** hesaplanır |
+| `exchange_time` | ISO-8601 UTC \| null | Borsadaki **gerçek işlem zamanı** (kaynak sağlarsa). **Sadece** `data_age_seconds` (yaş) hesabında kullanılır — bayat-bar tespiti için kullanılmaz |
+| `bar_time` | ISO-8601 UTC \| null | Fiyatın dayandığı bar'ın ait olduğu gün/an (gün granülerliği yeterli). Bayat-bar tespiti (`bist_stale_bar_skipped_total`) bunu kullanır — `exchange_time` yoksa (örn. TradingView bar-açılış damgası, İş Yatırım hiç) bile bu alandan çalışabilir |
+| `data_age_seconds` | number \| null | `exchange_time` (varsa) veya `updated_at`'ten bu yana geçen süre (sn); **okuma anında** hesaplanır — `bar_time` yaş hesabına KARIŞMAZ (bar-açılış damgası "az önce çekildi" ile "bugün sabah açılış" arasını ayıramaz) |
 | `stale` | bool | Seans **açıkken** `data_age_seconds`, `STALENESS_SECONDS` eşiğini aşarsa `true`. Kapalıyken her zaman `false` (kapanış fiyatı bayatlamaz) |
 
 Zarf (envelope) düzeyi alanlar (`/all`, `/quotes`, `/stream`): `market`, `count`,
@@ -719,6 +733,8 @@ Ayrıntılar için [CONTRIBUTING.md](CONTRIBUTING.md).
 | `PROVIDERS` | `yahoo_chart,tradingview,isyatirim` | Kaynak fallback zinciri (`yahoo` yfinance/curl_cffi auth-asılma riski nedeniyle varsayılandan çıkarıldı; provider silinmedi, env ile geri eklenebilir) |
 | `PROVIDER_MODE` | `failover` | `failover` \| `gapfill` |
 | `PROVIDER_FETCH_TIMEOUT` | `45` | Tek `provider.fetch_quotes()` çağrısı için sert üst sınır (sn); aşılırsa sonraki kaynağa düşülür |
+| `GUARD_COOLDOWN_FAIL_THRESHOLD` | `3` | Bir kaynağın ardışık kaç turda **tamamen** bayat-bar/damgasız guard'ıyla düşerse provider-seviyesinde cooldown'a alınacağı |
+| `GUARD_COOLDOWN_SECONDS` | `1800` | Cooldown süresi (sn) — bu sürede kaynak sorgulanmaz, sonra yeniden denenir |
 | `UPDATE_INTERVAL` | `60` | Güncelleme aralığı (sn) |
 | `STALENESS_SECONDS` | `300` | Bayatlık eşiği (`/ready`) |
 | `RATE_LIMIT` | `120/minute` | IP başına limit |

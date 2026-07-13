@@ -202,6 +202,8 @@ def test_all_bytes_cache_hit_identical(monkeypatch):
 
 
 def test_validate_endpoint(monkeypatch):
+    from datetime import UTC, datetime
+
     from app.models import Quote
 
     _seed_store()  # primary: THYAO=334, GARAN=133.5
@@ -210,7 +212,17 @@ def test_validate_endpoint(monkeypatch):
         name = "yahoo_chart"
 
         async def fetch_quotes(self, symbols):
-            return {s: Quote(symbol=s, price=334.0 if s == "THYAO" else 133.5) for s in symbols}
+            # MEDIUM-5: damgasiz-referans guard'i seans acikken devrede -- bu
+            # testin amaci sapma hesabi, tazelik degil; guncel bar_time
+            # vererek wall-clock seans durumundan bagimsiz kalir.
+            return {
+                s: Quote(
+                    symbol=s,
+                    price=334.0 if s == "THYAO" else 133.5,
+                    bar_time=datetime.now(UTC),
+                )
+                for s in symbols
+            }
 
     monkeypatch.setattr("app.main.aggregator.get_provider", lambda name: FakeRef())
     with TestClient(app) as c:
@@ -321,7 +333,12 @@ def test_all_etag_stable_despite_data_age_drift(override_settings, monkeypatch):
     _seed_store()
 
     calls = {"n": 0}
-    base = real_datetime(2026, 7, 13, 10, 0, 0, tzinfo=UTC)
+    # base gercek "simdi"den turetilir: sabit bir gecmis tarih kullanilirsa
+    # (ornegin testin gercekten calistigi andan SONRAKI bir tarih), quote'un
+    # gercek updated_at'i bu sabit tarihten daha yeni olabilir -- data_age_seconds
+    # negatif cikar, 0'da klemplenir (MEDIUM-2) ve iki cagri da 0.0 verip test
+    # yanlislikla "ayni" gorunur (yeniden hesaplandigini KANITLAYAMAZ).
+    base = real_datetime.now(UTC)
 
     class FakeDateTime:
         @staticmethod
@@ -374,6 +391,22 @@ def test_validate_reports_compared_flag(monkeypatch):
     with TestClient(app) as c:
         body = c.get("/validate", params={"symbols": "THYAO"}).json()
         assert body["compared"] is False
+
+
+def test_validate_endpoint_does_not_inflate_no_reference_metric(monkeypatch):
+    """LOW-3: /validate insan-teshis (operator poll'u) -- her cagri
+    bist_validate_no_reference_total'i artirirsa arka plan drift-monitörünün
+    gercek 'referans bulunamadi' orani okunamaz hale gelirdi."""
+    from app import metrics
+
+    _seed_store()
+    monkeypatch.setattr("app.main.aggregator.get_provider", lambda name: None)
+    before = metrics.VALIDATE_NO_REFERENCE.labels(reason="no_data")._value.get()
+    with TestClient(app) as c:
+        for _ in range(3):
+            c.get("/validate", params={"symbols": "THYAO"})
+    after = metrics.VALIDATE_NO_REFERENCE.labels(reason="no_data")._value.get()
+    assert after == before
 
 
 def test_quotes_symbol_limit_boundary_passes(override_settings):
@@ -498,6 +531,8 @@ def test_all_quotes_report_data_age_seconds():
 
 
 def test_validate_threshold_from_settings(monkeypatch, override_settings):
+    from datetime import UTC, datetime
+
     from app.models import Quote
 
     override_settings(cross_validate_max_pct=5.0)
@@ -507,7 +542,10 @@ def test_validate_threshold_from_settings(monkeypatch, override_settings):
         name = "yahoo_chart"
 
         async def fetch_quotes(self, symbols):
-            return {s: Quote(symbol=s, price=334.0 * 1.03) for s in symbols}  # %3 sapma
+            # MEDIUM-5: bkz. test_validate_endpoint yorumu.
+            return {
+                s: Quote(symbol=s, price=334.0 * 1.03, bar_time=datetime.now(UTC)) for s in symbols
+            }  # %3 sapma
 
     monkeypatch.setattr("app.main.aggregator.get_provider", lambda name: FakeRef())
     with TestClient(app) as c:

@@ -42,6 +42,11 @@ class Aggregator:
         # Sembol -> (ilk red, son red) monotonic. Kesintisiz red penceresini izler;
         # herhangi bir kabulde temizlenir, escape'ten uzun bosluk pencereyi sifirlar.
         self._sanity_reject_since: dict[str, tuple[float, float]] = {}
+        # MEDIUM-7: provider adi -> ardisik TAM guard-dusme sayisi / cooldown
+        # bitis ani (monotonic). symbol_circuit bu dususlerden MUAF oldugu icin
+        # (MEDIUM-3) baska hicbir fren yoktu; bkz. asagidaki fetch_quotes.
+        self._guard_drop_streak: dict[str, int] = {}
+        self._guard_cooldown_until: dict[str, float] = {}
         for name in settings.providers:
             factory = _FACTORY.get(name)
             if factory is None:
@@ -163,6 +168,18 @@ class Aggregator:
                 logger.debug("%s devre disi (circuit=%s), atlaniyor", provider.name, breaker.state)
                 continue
 
+            cooldown_until = self._guard_cooldown_until.get(provider.name)
+            if cooldown_until is not None:
+                if time.monotonic() < cooldown_until:
+                    logger.debug(
+                        "%s guard-cooldown'da (bitis=%.0f), atlaniyor",
+                        provider.name,
+                        cooldown_until,
+                    )
+                    continue
+                del self._guard_cooldown_until[provider.name]
+                metrics.PROVIDER_GUARD_COOLDOWN.labels(provider=provider.name).set(0)
+
             ask = remaining if gapfill else symbols
             ask = [s for s in ask if symbol_circuit.allow(provider.name, s)]
             if not ask:
@@ -198,38 +215,85 @@ class Aggregator:
                 logger.warning("%s fetch hatasi, sonraki kaynaga dusuluyor: %s", provider.name, exc)
                 continue
 
-            # H2: seans acikken bayat bar (dunku/eski veri noktasi) dondüren
-            # sembolleri "hic gelmemis" say -- provider Quote ÜRETMEMIS gibi
-            # davran, sonraki kaynaga (gapfill) dusulsun. Kapsama/circuit
-            # muhasebesi (asagida) bu filtrelenmis fetched'e gore hesaplanir.
+            # H2/HIGH-4: seans acikken bayat bar (dunku/eski veri noktasi)
+            # dondüren sembolleri "hic gelmemis" say -- provider Quote
+            # ÜRETMEMIS gibi davran, sonraki kaynaga (gapfill) dusulsun.
+            # Kapsama/circuit muhasebesi (asagida) bu filtrelenmis fetched'e
+            # gore hesaplanir. `bar_time` TERCIH EDILIR (guard'in asil
+            # sozlesmesi -- bkz. models.py): isyatirim/tradingview artik
+            # exchange_time'i HIC doldurmuyor (yalnizca bar_time); bu
+            # kaynaklar icin exchange_time'a bakmaya devam etmek guard'i
+            # kalici olarak devre disi birakirdi (HIC tetiklenmezdi, cunku
+            # is_stale_bar(None,...)=False). yahoo_chart gibi ikisi de ayni
+            # olan kaynaklarda fark etmez.
             guard_dropped: set[str] = set()
             market_open_now = is_market_open(moment)
-            for s in [s for s, q in fetched.items() if is_stale_bar(q.exchange_time, moment)]:
+            for s in [
+                s for s, q in fetched.items() if is_stale_bar(q.bar_time or q.exchange_time, moment)
+            ]:
                 guard_dropped.add(s)
                 metrics.STALE_BAR_SKIPPED.labels(provider=provider.name).inc()
                 logger.warning(
-                    "%s bayat bar: sembol=%s exchange_time=%s (simdi=%s, seans acik) — "
-                    "quote atlandi",
+                    "%s bayat bar: sembol=%s bar_time=%s exchange_time=%s (simdi=%s, seans acik) "
+                    "— quote atlandi",
                     provider.name,
                     s,
+                    fetched[s].bar_time,
                     fetched[s].exchange_time,
                     moment.isoformat(),
                 )
                 del fetched[s]
 
-            # HIGH-1: seans acikken exchange_time hic URETEMEYEN kaynak da ayni
-            # kuraldan muaf olmamali -- canli olay: TradingView damgasiz oldugu
+            # HIGH-1/HIGH-4: seans acikken HICBIR zaman damgasi (ne bar_time
+            # ne exchange_time) URETEMEYEN kaynak da ayni kuraldan muaf
+            # olmamali -- canli olay: TradingView eskiden damgasiz oldugu
             # icin guard'dan tamamen kaciyor, 2 yillik bayat bir fiyati "taze"
             # diye servis ediyordu. Damgasiz veri seans icinde guvenilmez.
-            for s in [s for s, q in fetched.items() if market_open_now and q.exchange_time is None]:
+            # Koşul HER IKI alanin da None olmasini arar (yalniz exchange_time
+            # kontrolu, artik exchange_time hic doldurmayan isyatirim/
+            # tradingview icin bar_time taze olsa bile HER TURDA yanlislikla
+            # tetiklenirdi -- feed seans icinde fiilen tek kaynaga inerdi).
+            for s in [
+                s
+                for s, q in fetched.items()
+                if market_open_now and q.exchange_time is None and q.bar_time is None
+            ]:
                 guard_dropped.add(s)
                 metrics.MISSING_EXCHANGE_TIME.labels(provider=provider.name).inc()
                 logger.warning(
-                    "%s exchange_time yok: sembol=%s (seans acik) — quote atlandi",
+                    "%s zaman damgasi yok (ne bar_time ne exchange_time): sembol=%s (seans acik) "
+                    "— quote atlandi",
                     provider.name,
                     s,
                 )
                 del fetched[s]
+
+            # MEDIUM-7: guard_dropped'in ASK'in TAMAMINI yuttugu (hicbir sey
+            # hayatta kalmadigi) tur -- provider bu sembolleri "cevapladi" ama
+            # tumu politika geregi (bayat/damgasiz) elendi. symbol_circuit bunu
+            # basarisizlik SAYMAZ (MEDIUM-3) -- ayrica bir fren gerekir.
+            if guard_dropped and not fetched:
+                streak = self._guard_drop_streak.get(provider.name, 0) + 1
+                self._guard_drop_streak[provider.name] = streak
+                if streak >= settings.guard_cooldown_fail_threshold:
+                    self._guard_cooldown_until[provider.name] = (
+                        time.monotonic() + settings.guard_cooldown_seconds
+                    )
+                    # Cooldown aktive edilince sayac sifirlanir: aksi halde cooldown
+                    # bitiminde ilk kontrolde streak zaten esigin uzerinde kalir ve
+                    # provider hicbir gercek yeniden-deneme sansi olmadan ANINDA
+                    # tekrar cooldown'a girer (sonsuz dongu).
+                    self._guard_drop_streak.pop(provider.name, None)
+                    metrics.PROVIDER_GUARD_COOLDOWN.labels(provider=provider.name).set(1)
+                    logger.warning(
+                        "%s ardisik %d turdur TAMAMEN guard'la dusuyor -- %.0f sn cooldown'a "
+                        "alindi",
+                        provider.name,
+                        streak,
+                        settings.guard_cooldown_seconds,
+                    )
+            else:
+                self._guard_drop_streak.pop(provider.name, None)
 
             if self._coverage_ok(fetched, ask):
                 breaker.record_success()

@@ -47,6 +47,10 @@ async def test_fetch_quotes_parses_meta():
     assert q.exchange_time is not None
     assert int(q.exchange_time.timestamp()) == _MARKET_TIME_EPOCH
     assert q.exchange_time.tzinfo is not None
+    # HIGH-4: regularMarketTime hem gercek islem-ani (exchange_time) hem de
+    # bar_time'dir (bu kaynak icin ikisi ayni deger -- guncel islem zamani zaten
+    # "bugunku bar" anlamina da gelir).
+    assert q.bar_time == q.exchange_time
 
 
 @respx.mock

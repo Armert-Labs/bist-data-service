@@ -55,11 +55,16 @@ QUOTES_BY_SOURCE = Gauge(
 )
 MISSING_EXCHANGE_TIME = Counter(
     "bist_missing_exchange_time_total",
-    "Seans acikken exchange_time uretemeyen (damgasiz) kaynak nedeniyle atlanan quote sayisi",
+    "Seans acikken hic zaman damgasi (bar_time/exchange_time) uretemeyen kaynak nedeniyle atlanan quote sayisi",
     ["provider"],
 )
 VALIDATE_NO_REFERENCE = Counter(
     "bist_validate_no_reference_total",
-    "Bagimsiz referans bulunamadigi (kendi kaynagi/bayat/veri yok) icin dogrulanamayan karsilastirma",
+    "Bagimsiz referans bulunamadigi (kendi kaynagi/bayat/damgasiz/veri yok) icin dogrulanamayan karsilastirma",
     ["reason"],
+)
+PROVIDER_GUARD_COOLDOWN = Gauge(
+    "bist_provider_guard_cooldown",
+    "Kaynak, tekrarlanan tam guard-dusmesi nedeniyle gecici cooldown'da mi (1/0)",
+    ["provider"],
 )

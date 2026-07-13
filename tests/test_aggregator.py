@@ -64,6 +64,8 @@ def _agg(providers):
     agg = _TestAggregator.__new__(_TestAggregator)
     agg._providers = [(p, CircuitBreaker(p.name)) for p in providers]
     agg._sanity_reject_since = {}
+    agg._guard_drop_streak = {}
+    agg._guard_cooldown_until = {}
     return agg
 
 
@@ -471,6 +473,130 @@ async def test_guard_dropped_symbol_does_not_trip_symbol_circuit():
     for _ in range(5):  # esik (varsayilan 3) asilacak kadar tekrar
         await agg.fetch_quotes([sym], now=_OPEN_NOW)
     assert symbol_circuit.allow("isyatirim", sym) is True
+
+
+async def test_stale_bar_time_dropped_when_exchange_time_absent():
+    # HIGH-4: TradingView `time` artik bar_time'a tasiniyor (exchange_time
+    # DEGIL); bayat-bar guard'i (Block-1) `bar_time` uzerinden CALISMALI.
+    stale_tv = FakeProvider(
+        "tradingview",
+        {
+            "THYAO": Quote(
+                symbol="THYAO", price=999.0, bar_time=_YESTERDAY_BAR, source="tradingview"
+            )
+        },
+    )
+    fresh = FakeProvider(
+        "yahoo_chart",
+        {
+            "THYAO": Quote(
+                symbol="THYAO", price=336.75, exchange_time=_TODAY_BAR, source="yahoo_chart"
+            )
+        },
+    )
+    agg = _agg([stale_tv, fresh])
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 336.75
+    assert res["THYAO"].source == "yahoo_chart"  # stale_tv'nin quote'u Block-1'le dustu
+
+
+async def test_fresh_bar_time_survives_when_exchange_time_absent():
+    # HIGH-4 regresyon kilidi: exchange_time'siz ama bar_time TAZE bir quote
+    # yanlislikla "damgasiz" guard'ina (Block-2) TAKILMAMALI. Block-2 eskiden
+    # yalniz `exchange_time is None` bakiyordu -- artik exchange_time hic
+    # doldurmayan kaynaklar (isyatirim/tradingview) icin bu, bar_time taze
+    # olsa BILE HER TURDA yanlislikla tetiklenip feed'i seans icinde fiilen
+    # tek kaynaga indirirdi. Tek provider (fallback YOK) ile test edildigi
+    # icin dogru davranmazsa sonuc BOS donerdi.
+    fresh_tv = FakeProvider(
+        "tradingview",
+        {"THYAO": Quote(symbol="THYAO", price=336.75, bar_time=_TODAY_BAR, source="tradingview")},
+    )
+    agg = _agg([fresh_tv])
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 336.75
+    assert res["THYAO"].source == "tradingview"
+
+
+async def test_tradingview_fresh_bar_survives_default_chain_during_session():
+    """HIGH-4 regresyon kilidi (varsayilan PROVIDERS zinciri): yahoo_chart bu
+    sembolu bulamazsa (gap) gapfill TradingView'e duser; TV'nin bugunku
+    bar_time'li ama exchange_time'siz quote'u KABUL EDILMELI -- aksi halde
+    feed seans icinde fiilen tek kaynaga (yahoo_chart) iner ve isyatirim'e
+    (asil son care) her turda bosuna dusulur."""
+    yahoo_chart = FakeProvider("yahoo_chart", {})  # THYAO'yu saglamiyor (gap)
+    tradingview = FakeProvider(
+        "tradingview",
+        {"THYAO": Quote(symbol="THYAO", price=336.75, bar_time=_TODAY_BAR, source="tradingview")},
+    )
+    isyatirim = FakeProvider(
+        "isyatirim", {"THYAO": Quote(symbol="THYAO", price=999.0, source="isyatirim")}
+    )
+    agg = _agg([yahoo_chart, tradingview, isyatirim])
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 336.75
+    assert res["THYAO"].source == "tradingview"
+    assert isyatirim.calls == 0  # TV'nin taze quote'u kabul edildi -- isyatirim'e hic dusulmedi
+
+
+async def test_provider_enters_cooldown_after_repeated_full_guard_drop(override_settings):
+    # MEDIUM-7: guard'in symbol_circuit muafiyeti (MEDIUM-3) dogruydu ama
+    # bunun yaninda HICBIR fren kalmamisti -- seans icinde yapisal olarak
+    # taze veri uretemeyen bir kaynak sonsuza kadar (her turda) sorulmaya
+    # devam ederdi (yuzlerce bosuna istek + tur butcesi). N tur ust uste
+    # TAMAMEN guard'la duserse kaynak cooldown'a alinmali.
+    override_settings(guard_cooldown_fail_threshold=3, guard_cooldown_seconds=1800.0)
+    frozen = FakeProvider(
+        "isyatirim",
+        {"THYAO": Quote(symbol="THYAO", price=344.5, exchange_time=_YESTERDAY_BAR)},
+    )
+    agg = _agg([frozen])
+    for _ in range(3):
+        await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert frozen.calls == 3
+    after = metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get()
+    assert after == 1
+
+    # Cooldown'dayken bir DAHA sorulmamali.
+    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert frozen.calls == 3
+
+
+async def test_provider_cooldown_expires_and_retries(override_settings, fake_clock):
+    override_settings(guard_cooldown_fail_threshold=2, guard_cooldown_seconds=100.0)
+    frozen = FakeProvider(
+        "isyatirim",
+        {"THYAO": Quote(symbol="THYAO", price=344.5, exchange_time=_YESTERDAY_BAR)},
+    )
+    agg = _agg([frozen])
+    for _ in range(2):
+        await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert frozen.calls == 2
+
+    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert frozen.calls == 2  # cooldown'da, sorulmadi
+
+    fake_clock.now += 200  # cooldown suresi (100sn) doldu
+    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert frozen.calls == 3  # tekrar sorulmaya baslandi
+
+
+async def test_provider_streak_resets_on_recovery(override_settings):
+    override_settings(guard_cooldown_fail_threshold=2, guard_cooldown_seconds=1800.0)
+    quotes = {"THYAO": Quote(symbol="THYAO", price=344.5, exchange_time=_YESTERDAY_BAR)}
+    prov = FakeProvider("isyatirim", quotes)
+    agg = _agg([prov])
+
+    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)  # 1. tam-guard-dusme
+    quotes["THYAO"] = Quote(symbol="THYAO", price=336.75, exchange_time=_TODAY_BAR)
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)  # iyilesme -- streak sifirlanir
+    assert res["THYAO"].price == 336.75
+
+    quotes["THYAO"] = Quote(symbol="THYAO", price=999.0, exchange_time=_YESTERDAY_BAR)
+    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)  # yeniden 1. tam-guard-dusme
+    after = metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get()
+    assert after == 0  # esik (2) henuz asilmadi -- streak gercekten sifirlanmisti
+    assert prov.calls == 3  # hala cooldown'da degil, her seferinde soruldu
 
 
 async def test_history_skips_non_history_provider_and_keeps_quotes():

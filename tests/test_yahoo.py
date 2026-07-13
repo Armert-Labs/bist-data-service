@@ -39,6 +39,41 @@ def test_fetch_quotes_parses_close_and_prev(monkeypatch):
     assert q.volume == 44008702
 
 
+def test_fetch_quotes_sets_bar_time_from_dataframe_index(monkeypatch):
+    # MEDIUM-5: yahoo (yfinance) hic zaman damgasi vermiyordu -- PROVIDERS'a
+    # geri eklenirse seans icinde guard tarafindan %100 duserdi (bkz.
+    # .env.example). DataFrame index'i (gunluk bar tarihi) zaten mevcut veri;
+    # bar_time'a tasinir.
+    idx = pd.to_datetime(["2026-07-10", "2026-07-13"])
+    df = pd.DataFrame(
+        {
+            "Open": [330.0, 335.0],
+            "High": [336.0, 338.0],
+            "Low": [329.0, 333.0],
+            "Close": [333.25, 334.0],
+            "Volume": [1000, 44008702],
+        },
+        index=idx,
+    )
+    monkeypatch.setattr(yahoo.yf, "download", lambda *a, **k: df)
+    quotes = yahoo.fetch_quotes(["THYAO"])
+    q = quotes["THYAO"]
+    assert q.bar_time is not None
+    assert q.bar_time.date().isoformat() == "2026-07-13"
+    assert q.exchange_time is None  # bu kaynak gercek islem-ani vermiyor
+
+
+def test_fetch_quotes_non_datetime_index_leaves_bar_time_none():
+    # Beklenmedik/sentetik bir DataFrame (index datetime degil) crash ETMEMELI;
+    # bar_time acikca None kalir.
+    from app.providers.yahoo import _quote_from_frame
+
+    df = pd.DataFrame({"Close": [10.0, 11.0]})  # varsayilan RangeIndex
+    q = _quote_from_frame("THYAO", df)
+    assert q is not None
+    assert q.bar_time is None
+
+
 def test_fetch_quotes_empty_frame(monkeypatch):
     monkeypatch.setattr(yahoo.yf, "download", lambda *a, **k: pd.DataFrame())
     assert yahoo.fetch_quotes(["THYAO"]) == {}

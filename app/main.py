@@ -660,7 +660,10 @@ async def validate(
     # Esik, yazma dogrulamasiyla ayni ayardan gelir; operator degistirdiginde
     # /validate raporu ile pipeline ayni dilde konusur. Bu salt-okunur
     # insan-teshis endpoint'i GAUGE YAZMAZ (bkz. run_drift_monitor -- tek yazar).
-    verdict = compare_against_references(primary, syms, references)
+    # record_metrics=False (LOW-3): operator poll'u bist_validate_no_reference_total
+    # sayacini sismesin -- o sayac arka plan drift-monitörünün gercek oranini
+    # yansitmali.
+    verdict = compare_against_references(primary, syms, references, record_metrics=False)
 
     return {
         "checked": len(syms),

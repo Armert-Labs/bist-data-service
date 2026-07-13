@@ -22,11 +22,19 @@ ACIKCA None birakilir + loglanir.
 
 NOT (review, HIGH-1): "lp" bu uc noktada SEANS ACIKKEN DE null geliyor (yalniz
 piyasa kapaliyken degil) -- TV fiilen hep "close" kolonunu dolduruyor, price
-neredeyse hep oraya duser. `time` kolonu (unix epoch, bar zamani) canli olarak
-dogrulandi ve exchange_time'a tasiniyor; bu, bayat-bar guard'inin (H2) bu
-kaynak icin de calismasini saglar -- onceden TradingView exchange_time
-uretmedigi icin guard'dan tamamen MUAFTI (canli olayda 2 yillik bayat bir
-fiyati "taze" diye servis etmesine yol acmisti).
+neredeyse hep oraya duser.
+
+NOT (review, HIGH-4 -- delta): `time` kolonu canli olarak dogrulandi ama BAR'IN
+ACILIS zamanini veriyor, GERCEK ISLEM ANINI DEGIL (ayni gun icinde sabit kalir,
+fiyat degistigi halde). Bu yuzden `exchange_time`'a DEGIL `bar_time`'a tasinir;
+`exchange_time` bu kaynak icin HER ZAMAN None kalir -- aksi halde okuma-aninda
+yas hesabi (data_age_seconds) "bugun sabah acilis" ile "az once cekildi"
+arasinda saatlerce fark uretip her TV quote'unu yanlislikla `stale=true`
+gosterirdi. Bayat-bar guard'i (is_stale_bar, H2) `bar_time`'i kullanir --
+gun granülerligi guard icin yeterlidir, `exchange_time`'in aksine yas icin
+kullanilmaz. `last_bar_update_time` gibi bir kolon YAS icin de guvenilmez
+(canli kanit: 2024'lük bir barda bu alan "bugun" donebiliyor -- feed'in
+"dokunma" anini verir, barin kendisini degil) -- kullanilmiyor.
 """
 
 from __future__ import annotations
@@ -110,7 +118,9 @@ def parse_quote(row: dict, columns: list[str] | None = None) -> Quote | None:
         logger.debug("tradingview %s: change_abs bos, previous_close hesaplanamiyor", bist)
 
     time_epoch = _f(values.get("time"))
-    exchange_time = datetime.fromtimestamp(time_epoch, tz=UTC) if time_epoch else None
+    # HIGH-4: bu bar-ACILIS zamanidir, gercek islem ani degil -- bar_time'a
+    # tasinir (guard icin), exchange_time'a DEGIL (yas hesabini bozmasin).
+    bar_time = datetime.fromtimestamp(time_epoch, tz=UTC) if time_epoch else None
 
     return Quote(
         symbol=bist,
@@ -126,7 +136,7 @@ def parse_quote(row: dict, columns: list[str] | None = None) -> Quote | None:
         source="tradingview",
         delayed=True,
         updated_at=datetime.now(UTC),
-        exchange_time=exchange_time,
+        bar_time=bar_time,
     )
 
 
