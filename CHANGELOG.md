@@ -381,6 +381,53 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
   `IsYatirimProvider`) escape + fail-open + `/ready`/`store.is_stale()`/metrik
   entegrasyon testleri eklendi.
 
+### Düzeltildi (devam 4) — açılış regresyonu + escape güvenlik açığı (2 HIGH + 1 MEDIUM + LOW'lar)
+- **HIGH-1 (REGRESYON — her seans açılışında `/ready` 503 + günlük critical
+  alarm):** veri ~15 dk (900 sn) gecikmeli olduğu için açılışın ilk ~15
+  dakikasında kaynağın `regularMarketTime`'ı hâlâ dünkü güne ait olabilir;
+  guard TÜM sembolleri düşürür, TUR-düzeyi fail-open devreye girer, hepsi
+  `stale=true` commit edilir. `store.is_stale()`'in KENDİ açılış toleransı
+  (`STALENESS_SECONDS`, vars. 300 sn) bu veri gecikmesinden (900 sn) kısa
+  olduğu için bu, **HER İŞLEM GÜNÜ** açılıştan ~5-16 dk sonra `/ready` 503 +
+  critical Telegram alarmı üretiyordu (rutin bir durum için) — alarm
+  yorgunluğu, gerçek fail-open (bilinmeyen tatil) rutin gürültüden ayırt
+  edilemez hâle geliyordu. İki fix birlikte: **(a)** `store.is_stale()`'in
+  açılış toleransı artık `GUARD_OPEN_GRACE_SECONDS` (vars. 1200 sn) ile
+  hizalı — açılışın ilk 20 dk'sında `/ready` 200 döner (servis hazır, veri
+  henüz gecikmeli, BEKLENEN); **(b)** `end_cycle()`'da açılış toleransı
+  penceresindeyken fail-open quote'ları yine döndürülür (veri sürekliliği,
+  `stale=true`) ama `bist_guard_fail_open_total` sayacı artırılmaz ve
+  CRITICAL log basılmaz (takvim-hatası alarmının sinyal değeri korunur;
+  rutin açılış gürültü üretmez). Pencere dışında eskisi gibi (sayaç +
+  CRITICAL).
+- **HIGH-2 (GÜVENLİK — sanity-escape'in `previous_close` iç-tutarlılık yolu
+  tek turda, teyitsiz deliniyordu):** kanıtlanmış açık — kaynak THYAO için
+  yanlışlıkla bir USD satırı dönerse (`price=2.50, previous_close=2.40`) bu
+  iki alan BİRLİKTE kaydığı için hem kendi içinde tutarlı GÖRÜNÜYOR hem bizim
+  TRY fiyatımızdan "önemli ölçüde farklı" GÖRÜNÜYORDU — guard'ın var oluş
+  sebebi olan hata sınıfının (yanlış-birim/yanlış-enstrüman) tam kendisi
+  escape'i açıyordu; tek bir bozuk turda (60 sn) client-side stop-loss'u
+  besleyen feed'e sessizce sızabilirdi. Bu yol **kaldırıldı** — yalnız ısrar
+  teyidi (3 ardışık tur, ~3 dk) kaldı: gerçek bir kurumsal işlem gün
+  öncesinden bilinir (3 dk gecikme maddi değil), geçici/hatalı bir payload
+  ise 3 dk boyunca aynı değeri tekrarlamaz.
+- **MEDIUM-1 + LOW-1 (iptal/kısmi turda fail-open metrik/log/commit
+  tutarsızlığı):** `end_cycle()` `try/finally` içinde çalıştığı için
+  `updater_cycle_timeout` aşımında (`CancelledError`) metrik+CRITICAL log
+  basılıyor ama `CancelledError` hemen sonra yukarı yayıldığı için commit
+  bloğuna hiç ulaşılmıyordu (log "kurtarıldı" derken veri store'a hiç
+  yazılmıyordu). Ayrıca kısmi bir turda (örn. 14 batch'ten yalnız 2'si
+  koşabildiyse) "hiçbir sembol taze değil" ölçüsü trivially doğru olup
+  fail-open'i yanlış değerlendirebiliyordu; aynı sorun kapanma sırasındaki
+  erken durdurmada da (`BackgroundUpdater.stop()`) vardı. `end_cycle(aborted=
+  bool)` parametresi eklendi: iptal/timeout veya erken durdurma ile YARIM
+  kalan bir turda fail-open (VE provider guard-drop streak) HİÇ
+  değerlendirilmez — ne metrik ne log ne commit; bir sonraki (tam) tur
+  normal değerlendirmeye kaldığı yerden devam eder.
+
+337 → 343 test (yeni: açılış-penceresi + aborted-cycle + USD-satırı senaryosu
+uçtan uca kilit testleri), ruff + ruff format + mypy temiz.
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi

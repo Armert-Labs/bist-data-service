@@ -50,7 +50,7 @@ async def test_update_once_wraps_batches_in_single_cooldown_cycle(monkeypatch, o
     def fake_begin_cycle():
         calls["begin"] += 1
 
-    def fake_end_cycle(now=None):
+    def fake_end_cycle(now=None, aborted=False):
         calls["end"] += 1
 
     async def fake_fetch(symbols, previous=None, **kwargs):
@@ -91,7 +91,7 @@ async def test_update_once_commits_end_cycle_fail_open_result(monkeypatch):
         "GARAN": Quote(symbol="GARAN", price=50.0, source="yahoo_chart", stale=True),
     }
 
-    def fake_end_cycle(now=None):
+    def fake_end_cycle(now=None, aborted=False):
         return fail_open_quotes
 
     async def no_sleep(*a, **k):
@@ -115,14 +115,19 @@ async def test_update_once_calls_end_cycle_even_when_cancelled_mid_batch(monkeyp
     (bkz. `_run_cycle`) bu coroutine'e `CancelledError` enjekte eder --
     try/finally OLMADAN `end_cycle()` HIC calismazdi (biriken guard-drop
     bilgisi sessizce kaybolur, hicbir provider'in streak'i ne artar ne
-    sifirlanir). Artik iptal edilse bile `end_cycle()` HER ZAMAN cagrilir."""
+    sifirlanir). Artik iptal edilse bile `end_cycle()` HER ZAMAN cagrilir.
+
+    MEDIUM-1 (review-4): iptal edilen bir tur `end_cycle(aborted=True)`
+    cagirmali -- kismi tur sistemik kanit SAYILMAZ (fail-open'i HIC
+    degerlendirmemesi gerekir, bkz. test_aggregator.py)."""
     store = MemoryStore()
     await store.connect()
 
-    calls = {"end": 0}
+    calls = {"end": 0, "aborted": None}
 
-    def fake_end_cycle(now=None):
+    def fake_end_cycle(now=None, aborted=False):
         calls["end"] += 1
+        calls["aborted"] = aborted
 
     async def slow_fetch(symbols, previous=None, **kwargs):
         await asyncio.sleep(10)  # asla zamaninda bitmez -- disaridan iptal edilir
@@ -135,6 +140,42 @@ async def test_update_once_calls_end_cycle_even_when_cancelled_mid_batch(monkeyp
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(up._update_once(), timeout=0.05)
     assert calls["end"] == 1  # iptal edilse bile end_cycle() cagrildi
+    assert calls["aborted"] is True  # MEDIUM-1: kismi tur oldugu acikca bildirildi
+
+
+async def test_update_once_marks_aborted_on_early_stop(monkeypatch):
+    """LOW-1: kapanma sirasinda (`BackgroundUpdater.stop()`) erken durdurma
+    da (istisna YOK, normal `break`) kismi tur sayilmali -- `aborted=True`
+    ile `end_cycle()`'a bildirilmeli (fail-open'i tetiklememesi icin)."""
+    store = MemoryStore()
+    await store.connect()
+
+    calls = {"aborted": None}
+
+    def fake_end_cycle(now=None, aborted=False):
+        calls["aborted"] = aborted
+        return {}
+
+    call_count = {"n": 0}
+
+    async def fake_fetch(symbols, previous=None, **kwargs):
+        call_count["n"] += 1
+        return {}
+
+    async def no_sleep(*a, **k):
+        return None
+
+    up = BackgroundUpdater(symbols_list=["A", "B", "C"], store=store)
+    up._stop.set()  # zaten durdurulmus -- ilk batch'ten once break tetiklenir
+
+    monkeypatch.setattr(updater_mod.aggregator, "end_cycle", fake_end_cycle)
+    monkeypatch.setattr(updater_mod.aggregator, "fetch_quotes", fake_fetch)
+    monkeypatch.setattr(updater_mod.asyncio, "sleep", no_sleep)
+
+    await up._update_once()
+
+    assert call_count["n"] == 0  # hicbir batch kosmadi
+    assert calls["aborted"] is True
 
 
 async def test_update_once_passes_previous_for_sanity(monkeypatch):

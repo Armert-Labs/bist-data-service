@@ -60,9 +60,15 @@ class BackgroundUpdater:
         # on-demand sorgusu bir kaynagi TUM semboller icin cooldown'a sokmasin).
         aggregator.begin_cycle()
         fail_open_quotes: dict[str, Quote] = {}
+        # MEDIUM-1/LOW-1 (review-4): tur YARIM kalirsa (iptal/timeout VEYA
+        # kapanma sirasinda erken durdurma) "hicbir sembol taze degil" olcusu
+        # yalniz kosulan az sayida batch'e dayanir -- TUM watchlist icin
+        # sistemik kanit SAYILMAZ (bkz. aggregator.end_cycle aborted).
+        aborted = False
         try:
             for start in range(0, len(self._symbols), batch_size):
                 if self._stop.is_set():
+                    aborted = True
                     break
                 batch = self._symbols[start : start + batch_size]
                 quotes = await aggregator.fetch_quotes(
@@ -76,6 +82,12 @@ class BackgroundUpdater:
                         source_counts[q.source] += 1
                     total += len(quotes)
                 await asyncio.sleep(settings.batch_pause)
+        except BaseException:
+            # MEDIUM-1: `updater_cycle_timeout` asiminda CancelledError (veya
+            # baska bir istisna) turu YARIDA keser -- ayni "kismi tur,
+            # sistemik kanit degil" kurali burada da gecerlidir.
+            aborted = True
+            raise
         finally:
             # MEDIUM-2 (review-2): butce asiminda (updater_cycle_timeout)
             # asyncio.wait_for bu coroutine'e CancelledError enjekte eder --
@@ -85,7 +97,12 @@ class BackgroundUpdater:
             # HIGH-3: end_cycle() artik TUR-bazli fail-open kararinin
             # SONUCUNU (varsa) dondurur -- ilgili batch'ler zaten bos donmustu
             # (guard onlari dusurmustu), bu yuzden asagida AYRICA commit edilir.
-            fail_open_quotes = aggregator.end_cycle()
+            # MEDIUM-1: `aborted=True` iken end_cycle() fail-open'i HIC
+            # degerlendirmez (ne metrik ne log ne commit) -- eskiden finally
+            # burada metrik/CRITICAL log basip, sonra CancelledError yukari
+            # yayildigi icin asagidaki commit blogu HIC calismiyordu (log
+            # "kurtarildi" derken veri store'a hic yazilmiyordu).
+            fail_open_quotes = aggregator.end_cycle(aborted=aborted)
 
         if fail_open_quotes:
             await commit_quotes(self._store, fail_open_quotes, market=state)
