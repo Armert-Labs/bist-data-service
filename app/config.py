@@ -82,8 +82,15 @@ class Settings:
     # sonsuza kadar asilip thread havuzunu doldurabiliyor (bkz. PROVIDER_FETCH_TIMEOUT
     # + yahoo provider'daki izole executor). Provider sinifi silinmedi; env ile
     # geri eklenebilir (PROVIDERS=yahoo,yahoo_chart,...).
+    # tradingview de PATRON KARARIYLA (hukuki) varsayilan zincirden CIKARILDI:
+    # TradingView Kullanim Sartlari §3 veriyi "yalnizca ekranda-gosterim" ile
+    # sinirlar, otomatik islem/algoritmik karar-verme/fiyat referanslama YASAKTIR
+    # -- Faz-2 client-side stop-loss tam bu tanima girer. Provider sinifi
+    # silinmedi (bkz. providers/tradingview.py ust dosya uyarisi); env ile geri
+    # eklenebilir ANCAK YALNIZCA insan-okur dashboard/teshis amaciyla, bot karar
+    # yoluna BAGLANMAMALIDIR.
     providers: list[str] = field(
-        default_factory=lambda: _get_list("PROVIDERS", ["yahoo_chart", "tradingview", "isyatirim"])
+        default_factory=lambda: _get_list("PROVIDERS", ["yahoo_chart", "isyatirim"])
     )
     # failover: ilk veri donduren kaynak yeter (verimli).
     # gapfill: her kaynak bir oncekinin eksiklerini tamamlar (kesintisizlik, onerilen).
@@ -185,12 +192,16 @@ class Settings:
     # boyunca HICBIR referans bulamaz (review HIGH-2: eski varsayim
     # [yahoo_chart, isyatirim] ile isyatirim seans-ici bayat-bar guard'i
     # (H2) yuzunden de elenince dogrulama fiilen tamamen olu kaliyordu).
-    # tradingview eklendi: exchange_time'i artik saglar (HIGH-1) ve seans
-    # icinde de canli veri dondurur.
+    # tradingview ONCEDEN buraya eklenmisti (HIGH-1'de exchange_time saglar
+    # hale geldigi icin) ama PATRON KARARIYLA (hukuki, bkz. providers.py
+    # yukarisi) varsayilan zincirden CIKARILDI. BILINEN VE KABUL EDILEN
+    # SONUC: seans icinde bagimsiz referans KALMADI -- isyatirim H2 bayat-bar
+    # guard'iyla elenir, tek aday yahoo_chart kendi kaynagi oldugu icin
+    # dislanir; _pick_reference fail-quiet donuyor (bist_validate_no_reference_total
+    # artar). Bu, Faz-2 lisansli realtime karar verilene kadar acik kalan
+    # bilinçli bir tavizdir (bkz. README/CHANGELOG).
     validate_providers: list[str] = field(
-        default_factory=lambda: _get_list(
-            "VALIDATE_PROVIDERS", ["yahoo_chart", "tradingview", "isyatirim"]
-        )
+        default_factory=lambda: _get_list("VALIDATE_PROVIDERS", ["yahoo_chart", "isyatirim"])
     )
 
     # --- Is Yatirim erisim ayarlari ---

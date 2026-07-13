@@ -157,12 +157,15 @@ async def test_cross_validate_stale_reference_ignored_fail_quiet(monkeypatch):
     assert out["THYAO"].price == 336.75  # bayat referans yuzunden reddedilmedi
 
 
-async def test_cross_validate_prod_default_survives_isyatirim_staleness(monkeypatch):
-    """HIGH-2 regresyon guard (prod DEFAULT config, override YOK): eski
-    varsayimda ([yahoo_chart, isyatirim]) birincil yahoo_chart'tan gelince tek
-    olasi bagimsiz referans isyatirim'di; isyatirim seans icinde H2 bayat-bar
-    guard'i yuzunden elenirse dogrulama TAMAMEN olu kaliyordu. Yeni varsayima
-    eklenen tradingview bunu telafi eder."""
+async def test_cross_validate_prod_default_fails_quiet_without_tradingview(monkeypatch):
+    """Patron karari (hukuki, TradingView ToS §3): tradingview varsayilan
+    VALIDATE_PROVIDERS'tan CIKARILDI. HIGH-2'nin cozdugu tekli-referans
+    riski (prod DEFAULT config, override YOK) bilinçli olarak GERI DONDU:
+    birincil yahoo_chart'tan gelince tek olasi bagimsiz referans isyatirim'dir;
+    isyatirim seans icinde H2 bayat-bar guard'i yuzunden elenirse dogrulama
+    BAGIMSIZ REFERANS BULAMAZ. Bu artik SESSIZ BOZULMA degil -- fail-quiet
+    (fiyat degismeden gecer) + bist_validate_no_reference_total{reason="stale"}
+    sayaci artar (bkz. README/CHANGELOG "bilinen ve kabul edilen sonuc")."""
 
     class YahooChartSelf:
         name = "yahoo_chart"
@@ -179,24 +182,17 @@ async def test_cross_validate_prod_default_survives_isyatirim_staleness(monkeypa
                 for s in symbols
             }
 
-    class TradingViewRef:
-        name = "tradingview"
-
-        async def fetch_quotes(self, symbols):
-            return {s: Quote(symbol=s, price=337.0, source="tradingview") for s in symbols}
-
-    providers = {
-        "yahoo_chart": YahooChartSelf(),
-        "isyatirim": StaleIsYatirim(),
-        "tradingview": TradingViewRef(),
-    }
+    providers = {"yahoo_chart": YahooChartSelf(), "isyatirim": StaleIsYatirim()}
     monkeypatch.setattr("app.pipeline.aggregator.get_provider", lambda name: providers.get(name))
 
+    before = metrics.VALIDATE_NO_REFERENCE.labels(reason="stale")._value.get()
     quotes = {"THYAO": Quote(symbol="THYAO", price=336.75, source="yahoo_chart")}
     out = await cross_validate_quotes(quotes, now=_OPEN_NOW)
-    # tradingview referans olarak bulunabildi (isyatirim bayat oldugu icin
-    # elendi) -- fiyat dogrulandi, sessizce "dogrulanamadi" DUSMEDI.
-    assert "THYAO" in out
+    after = metrics.VALIDATE_NO_REFERENCE.labels(reason="stale")._value.get()
+    # Fail-quiet: fiyat SESSIZCE (reddedilmeden) geciyor -- ama artik gercekten
+    # dogrulanmadi, bu da sayaca yansimali (sessiz bozulma degil, olculebilir).
+    assert out["THYAO"].price == 336.75
+    assert after == before + 1
 
 
 async def test_cross_validate_untimed_reference_ignored_during_session(monkeypatch):
@@ -289,19 +285,21 @@ async def test_drift_monitor_prod_default_detects_real_drift(monkeypatch):
     await store.connect()
     await store.set_quote("THYAO", Quote(symbol="THYAO", price=336.75, source="yahoo_chart"))
 
-    class TradingViewRef:
-        name = "tradingview"
+    class FreshIsYatirimRef:
+        name = "isyatirim"
 
         async def fetch_quotes(self, symbols):
-            # bar_time verilir (MEDIUM-5 damgasiz-referans guard'i wall-clock
-            # seans durumundan bagimsiz kalsin -- bu testin amaci drift, tazelik
-            # degil).
+            # bar_time verilir (MEDIUM-5 damgasiz-referans guard'i + H2
+            # bayat-bar guard'i wall-clock seans durumundan bagimsiz kalsin --
+            # bu testin amaci drift, tazelik degil). tradingview artik
+            # varsayilan VALIDATE_PROVIDERS'ta degil (ToS karari) -- tek
+            # bagimsiz referans isyatirim'dir.
             return {
-                s: Quote(symbol=s, price=360.0, source="tradingview", bar_time=datetime.now(UTC))
+                s: Quote(symbol=s, price=360.0, source="isyatirim", bar_time=datetime.now(UTC))
                 for s in symbols
             }
 
-    providers = {"tradingview": TradingViewRef()}
+    providers = {"isyatirim": FreshIsYatirimRef()}
     monkeypatch.setattr("app.pipeline.aggregator.get_provider", lambda name: providers.get(name))
 
     result = await run_drift_monitor(store, ["THYAO"], now=_OPEN_NOW)

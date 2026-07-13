@@ -1,5 +1,18 @@
 """TradingView scanner saglayici (resmi olmayan, herkese acik endpoint).
 
+!!! HUKUKI UYARI (patron karari, Faz-2 hazirligi) !!!
+TradingView Kullanim Sartlari (§3) veriyi YALNIZCA "ekranda-gosterim
+(display-only)" ile sinirlar; "otomatik islem, algoritmik karar-verme, fiyat
+referanslama, order verification, risk-yonetim programlari" kullanimini
+ISMEN YASAKLAR; TradingView icerigine dayali urun/servis uretmeyi de
+yasaklar. Abonelik satin almak bunu COZMEZ (satilan sey display-use
+lisansidir). Bu yuzden bu saglayici varsayilan `PROVIDERS`/`VALIDATE_PROVIDERS`
+zincirinden CIKARILDI (bkz. config.py). Sinif SILINMEDI, env ile geri
+eklenebilir (`PROVIDERS=yahoo_chart,tradingview,isyatirim`) ANCAK YALNIZCA
+insan-okur dashboard/teshis amaciyla, bilincli bir karar sonucu. **Bu
+saglayicinin ciktisi bot karar-yoluna (fiyat referanslama, stop-loss/emir
+tetikleme, otomatik islem) BAGLANMAMALIDIR.**
+
 Yahoo ve Is Yatirim gibi bu proje zaten resmi-olmayan kaynaklar kullanir;
 TradingView scanner de ayni cizgide bagimsiz bir kaynak/dogrulama saglar.
 
