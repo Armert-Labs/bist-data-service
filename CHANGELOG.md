@@ -428,6 +428,37 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
 337 → 343 test (yeni: açılış-penceresi + aborted-cycle + USD-satırı senaryosu
 uçtan uca kilit testleri), ruff + ruff format + mypy temiz.
 
+### Düzeltildi (devam 5) — wedge/donmuş updater tespiti + doküman kısıtları (1 MEDIUM + LOW'lar)
+- **MEDIUM (servisin bilinen ANA arızasının dedektörü açılışta kördü):**
+  açılış toleransı penceresinde (`GUARD_OPEN_GRACE_SECONDS`) `store.
+  is_stale()` koşulsuz `False` döndüğü için "veri gecikmeli ama boru hattı
+  sağlıklı" ile "boru hattı **ÖLÜ**" (donmuş/wedge updater — servisin bilinen
+  ana arızası, `py-spy` watcher tam bunun için kuruldu) ayırt edilemiyordu;
+  ikisi de bu pencerede `fresh_ratio=0` üretiyordu. Sonuç: updater Cuma'dan
+  beri ölüyse bile açılıştan itibaren **20 dakika boyunca** `/ready` yanlış
+  `200` dönüyordu (tespit gecikmesi 5 dk'dan 20 dk'ya çıkmıştı). Fix:
+  `/ready` artık ayrıca `last_update_age_seconds`'a bakar — **market
+  açıkken** bu değer `2 × UPDATE_INTERVAL`'i (vars. 120 sn) aşarsa (sağlıklı
+  bir updater her `UPDATE_INTERVAL`'de store'a yazar) boru hattı
+  gerçekten ölmüştür ve `ready=false` **anında** döner, açılış toleransı
+  penceresinin dolmasını beklemez. Market kapalıyken bu kontrol devre
+  dışıdır (updater bilerek çalışmaz — `UPDATE_WHEN_CLOSED=false` varsayılan
+  — eski veri bir arıza değildir; bu kontrol olmasaydı her akşam/hafta sonu
+  yanlışlıkla 503 üretirdi).
+- **LOW (dokümantasyon):** `GUARD_OPEN_GRACE_SECONDS` (vars. 1200 sn) ile
+  belgelenen veri gecikmesi (~900 sn) arasında yalnız ~300 sn marj olduğu
+  `.env.example` + README'ye açıkça yazıldı — kaynak gecikmesi bir gün 20
+  dk'yı aşarsa bu değerin orantılı büyütülmesi gerektiği (aksi hâlde günlük
+  yanlış CRITICAL + 503 geri döner) artık kısıt olarak belgeleniyor.
+- **LOW (kabul edilmiş takas, dokümantasyon):** ısrar teyidinin (3 ardışık
+  tur) mutlak bir garanti olmadığı — kaynak bir ticker'ı **kalıcı olarak**
+  yanlış bir satıra eşlerse (örn. sürekli USD satırı) bu hatalı fiyat da 3
+  tur ısrar edip escape ile kabul edilir; tek kaynaklı bir dünyada
+  kalıcı-yanlış-eşleme ile gerçek kurumsal işlem formen ayırt edilemez —
+  README'ye bilinçli kabul edilmiş bir risk olarak belgelendi.
+
+345 test yeşil (bir önceki turda 343), ruff + ruff format + mypy temiz.
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi
