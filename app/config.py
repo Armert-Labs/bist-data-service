@@ -126,6 +126,26 @@ class Settings:
     guard_cooldown_seconds: float = field(
         default_factory=lambda: _get_float("GUARD_COOLDOWN_SECONDS", 1800.0)
     )
+    # HIGH-1: guard-cooldown esigi (yukarida) artik TUR (updater cycle)
+    # basina bir kez degerlendirilir (bkz. aggregator.begin_cycle/end_cycle) --
+    # eskiden BATCH basina degerlendiriliyordu (bir tur ~13 batch cagrisi
+    # uretiyor), bu da "3 tur" sigortasini saniyeler icinde patlatiyordu.
+    # Acilis toleransi: seans acilisindan sonraki bu kadar saniye icinde
+    # (market.seconds_since_open) guard-dususleri streak'e YAZILMAZ (guard
+    # yine calisir, bayat veri gecmez -- yalniz cooldown'u TETIKLEMEZ).
+    # Kaynaklar acilisin ilk saniyelerinde henuz dunku barlarini guncellemiyor
+    # olabilir; bu yapisal bir gecikme, kalici bir ariza degil.
+    guard_open_grace_seconds: float = field(
+        default_factory=lambda: _get_float("GUARD_OPEN_GRACE_SECONDS", 300.0)
+    )
+    # MEDIUM-2: streak'in yaslanmasi -- son artistan bu kadar saniye sonra
+    # hicbir yeni tam-dusme olmadiysa streak SIFIRLANIR. Aksi halde sabah
+    # erken saatte birikmis bir streak, saatlerce durup ogleden sonraki TEK
+    # kotu turla cooldown'a donusebilirdi (streak'in "ardisiklik" anlami
+    # bozulur). 0 = kapali (asla yaslanma ile sifirlanmaz).
+    guard_drop_streak_max_age_seconds: float = field(
+        default_factory=lambda: _get_float("GUARD_DROP_STREAK_MAX_AGE_SECONDS", 900.0)
+    )
     # Yazma aninda capraz-kaynak dogrulama (on-demand icin varsayilan acik).
     write_cross_validate: bool = field(
         default_factory=lambda: _get_bool("WRITE_CROSS_VALIDATE", True)

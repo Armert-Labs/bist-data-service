@@ -49,11 +49,22 @@ class BackgroundUpdater:
         started = time.monotonic()
         batch_size = max(1, settings.batch_size)
 
+        # HIGH-1: bu tam TUR (tum batch'ler) tek bir guard-cooldown
+        # degerlendirmesi olarak sayilir -- begin_cycle/end_cycle arasinda
+        # biriken "provider tamamen guard'la dustu mu" bilgisi TUR sonunda
+        # bir kez degerlendirilir (batch-bazli degil). count_toward_cooldown=
+        # True: bu, updater'in yapilandirilmis TUR dongusu oldugunu acikca
+        # belirtir (HIGH-2: on-demand/pipeline cagrilari bunu GECMEZ, varsayilan
+        # False kalir -- bugun islem gormemis tek bir hissenin tekrarli
+        # on-demand sorgusu bir kaynagi TUM semboller icin cooldown'a sokmasin).
+        aggregator.begin_cycle()
         for start in range(0, len(self._symbols), batch_size):
             if self._stop.is_set():
                 break
             batch = self._symbols[start : start + batch_size]
-            quotes = await aggregator.fetch_quotes(batch, previous=previous)
+            quotes = await aggregator.fetch_quotes(
+                batch, previous=previous, count_toward_cooldown=True
+            )
             if quotes:
                 await commit_quotes(self._store, quotes, market=state)
                 for s, q in quotes.items():
@@ -62,6 +73,7 @@ class BackgroundUpdater:
                     source_counts[q.source] += 1
                 total += len(quotes)
             await asyncio.sleep(settings.batch_pause)
+        aggregator.end_cycle()
 
         duration = time.monotonic() - started
         metrics.UPDATE_DURATION.observe(duration)

@@ -71,17 +71,51 @@ elenir, yalnızca **piyasa kapalıyken** (son kapanış meşru veridir) devreye
 girer. Bu, bilinçli bir tasarım kararıdır (sessizce bayat fiyat servis etmek
 yerine açıkça düşürmek); `/ready`'deki `providers` durumu "sağlıklı" görünse
 bile bir sembolün seans içinde İş Yatırım'dan hiç veri gelmiyor olması
-**beklenen** davranıştır.
+**beklenen** davranıştır. Bu yüzden İş Yatırım (`intraday_capable=False` —
+yalnızca günlük EOD çubuk verir) seans **açıkken updater tarafından hiç
+sorgulanmaz** (yapısal bir kısıt, arıza değil; provider'ın kendisi seans
+kapalıyken normal sorgulanır).
 
-Bir kaynak **ardışık `GUARD_COOLDOWN_FAIL_THRESHOLD` (vars. 3) turda** yukarıdaki
-guard'lar yüzünden isteğinin **tamamını** kaybederse (yapısal olarak taze veri
-üretemiyor demektir — örn. gerçek bir arıza değil, seans-içi EOD/bar
-kısıtı) provider-seviyesinde `GUARD_COOLDOWN_SECONDS` (vars. 1800 sn) süreyle
-geçici olarak devre dışı bırakılır (`bist_provider_guard_cooldown{provider}`
-gauge=1) — aksi halde sembol devre kesici bu düşüşleri saymadığı için
-(bilinçli tasarım) kaynak sonsuza kadar boşuna sorgulanmaya devam ederdi. En
-az bir quote geçtiğinde ardışık sayaç sıfırlanır; cooldown bitince kaynak
-yeniden denenir.
+**Provider-seviyesi guard-cooldown (backpressure):** bir kaynak ardışık
+`GUARD_COOLDOWN_FAIL_THRESHOLD` (vars. 3) **TUR** (updater'in tam bir
+güncelleme döngüsü — tipik olarak ~13 batch isteğinden oluşur) boyunca
+yukarıdaki guard'lar yüzünden isteğinin **tamamını** kaybederse
+provider-seviyesinde `GUARD_COOLDOWN_SECONDS` (vars. 1800 sn) süreyle geçici
+olarak devre dışı bırakılır (`bist_provider_guard_cooldown{provider}`
+gauge=1) — aksi halde sembol devre kesici bu düşüşleri saymadığı için kaynak
+sonsuza kadar boşuna sorgulanmaya devam ederdi. Sayaç **TUR bazındadır, BATCH
+bazında değil** (bir turun onlarca batch'i tek bir "ardışık düşme" sayılır);
+yalnızca **updater'ın yapılandırılmış döngüsü** bu sayaca katkıda bulunur —
+on-demand (`/quote/{symbol}` cache-miss) istekleri asla cooldown tetiklemez
+(bugün işlem görmemiş tek bir hissenin tekrarlı sorgusu koca bir kaynağı tüm
+semboller için cooldown'a sokmasın diye). En az bir quote geçtiğinde ardışık
+sayaç sıfırlanır; `GUARD_DROP_STREAK_MAX_AGE_SECONDS` (vars. 900 sn) süreden
+uzun süredir artmayan bir sayaç da geçersiz sayılır (saatler önce birikmiş bir
+sayaç, çok sonraki tek kötü turla cooldown'a dönüşmesin diye). Seans
+açılışından sonraki `GUARD_OPEN_GRACE_SECONDS` (vars. 300 sn) içindeki
+düşüşler sayaca hiç yazılmaz (kaynaklar açılışın ilk saniyelerinde henüz
+dünkü barlarını güncellemiyor olabilir — geçici bir gecikme, kalıcı bir arıza
+değil). Cooldown bitince kaynak yeniden denenir.
+
+> **Süreç kapsamı notu:** cooldown durumu ve `bist_provider_guard_cooldown`
+> gauge'u **yalnızca updater'ın döngüsünden** (yukarıdaki `count_toward_cooldown`
+> mekanizmasıyla) yazılır; on-demand yol asla yazmaz (yalnızca mevcut bir
+> cooldown'a **saygı gösterir**, tetiklemez). Redis'siz (tek-instance)
+> dağıtımda updater ve API aynı süreçte çalışsa bile bu ayrım korunur; Redis'li
+> (çok-instance) dağıtımda ise updater ve API süreçlerinin ayrı `Aggregator`
+> nesneleri olduğu için bu gauge doğal olarak yalnızca updater sürecinin
+> `:8001/metrics`'inde anlamlıdır.
+
+**Fail-open emniyet supabı (`bist_guard_fail_open_total`):** **birden fazla
+bağımsız kaynak** aynı turda **tüm sembolleri** guard'la düşürürse (tek kaynak
+değil — tek kaynaksa bu "yapısal kısıt" ile "takvim/tatil listesi hatası"
+ayırt edilemez, güvenli varsayılan normal cooldown yoludur) bu genellikle bir
+kaynak arızası değil **piyasa-açık varsayımının** (örn. `MARKET_HOLIDAYS`
+listesinde eksik bir resmi tatil) **yanlış** olduğunun işaretidir. Bu
+durumda guard o tur için geçici olarak devre dışı bırakılır: elde bulunan
+(guard'ın düşürdüğü) veri `stale` işaretiyle geçirilir, hiçbir kaynak
+cooldown'a girmez (sistemik bir sorun tek bir kaynağa atfedilmez) ve bir
+CRITICAL log + sayaç artışı operatörü uyarır.
 
 ### ⚖️ TradingView'in varsayılan zincirden çıkarılması (hukuki karar) + bilinen açık maddeler
 
@@ -774,10 +808,12 @@ Ayrıntılar için [CONTRIBUTING.md](CONTRIBUTING.md).
 |---|---|---|
 | `REDIS_URL` | *(boş)* | Boş = in-memory. Compose: `redis://redis:6379/0` |
 | `PROVIDERS` | `yahoo_chart,isyatirim` | Kaynak fallback zinciri (`yahoo` teknik risk, `tradingview` **hukuki** gerekçeyle — ToS §3, bkz. yukarısı — varsayılandan çıkarıldı; ikisi de provider sınıfı silinmeden env ile geri eklenebilir) |
-| `PROVIDER_MODE` | `failover` | `failover` \| `gapfill` |
+| `PROVIDER_MODE` | `gapfill` | `failover` \| `gapfill` \| `hybrid` |
 | `PROVIDER_FETCH_TIMEOUT` | `45` | Tek `provider.fetch_quotes()` çağrısı için sert üst sınır (sn); aşılırsa sonraki kaynağa düşülür |
-| `GUARD_COOLDOWN_FAIL_THRESHOLD` | `3` | Bir kaynağın ardışık kaç turda **tamamen** bayat-bar/damgasız guard'ıyla düşerse provider-seviyesinde cooldown'a alınacağı |
+| `GUARD_COOLDOWN_FAIL_THRESHOLD` | `3` | Bir kaynağın ardışık kaç **TUR** (batch değil) boyunca tamamen bayat-bar/damgasız guard'ıyla düşerse provider-seviyesinde cooldown'a alınacağı |
 | `GUARD_COOLDOWN_SECONDS` | `1800` | Cooldown süresi (sn) — bu sürede kaynak sorgulanmaz, sonra yeniden denenir |
+| `GUARD_OPEN_GRACE_SECONDS` | `300` | Seans açılışından sonraki bu kadar saniye içindeki guard-düşüşleri cooldown sayacına yazılmaz (açılış toleransı) |
+| `GUARD_DROP_STREAK_MAX_AGE_SECONDS` | `900` | Son artıştan bu kadar saniye sonra hâlâ yeni bir tam-düşme olmadıysa sayaç geçersiz sayılır (yaşlanma) |
 | `UPDATE_INTERVAL` | `60` | Güncelleme aralığı (sn) |
 | `STALENESS_SECONDS` | `300` | Bayatlık eşiği (`/ready`) |
 | `RATE_LIMIT` | `120/minute` | IP başına limit |

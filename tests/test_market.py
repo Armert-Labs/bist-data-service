@@ -80,10 +80,37 @@ def test_is_stale_bar_todays_bar_while_open_is_fresh():
     assert is_stale_bar(today_bar, _dt(2026, 7, 6, 12, 0)) is False
 
 
-def test_last_trading_day_on_open_weekday_is_today():
+def test_last_trading_day_before_close_rolls_back_one_day():
+    """CRITICAL-1: fonksiyon 'en son KAPANMIS islem gunu' sorusuna cevap verir.
+    Bugunun kapanisi (18:15) henuz gelmediyse -- seans ici (12:00) DAHIL --
+    en son KAPANMIS gun DUNDUR (bugun degil; bugunun seansi henuz
+    tamamlanmadi). Bu, is_stale_bar'in kapali-piyasa dalinin (bkz. asagisi)
+    ayri bir yoldan (is_market_open dali) zaten dogru sonuc uretmesiyle
+    CELISMEZ -- last_trading_day yalniz market KAPALIYKEN cagrilir."""
     from app.market import last_trading_day
 
-    assert last_trading_day(_dt(2026, 7, 6, 12, 0)) == _dt(2026, 7, 6, 0, 0).date()
+    # Pazartesi 12:00 (seans ici) -- kapanis henuz gelmedi -> Cuma.
+    assert last_trading_day(_dt(2026, 7, 6, 12, 0)) == _dt(2026, 7, 3, 0, 0).date()
+
+
+def test_last_trading_day_preopen_weekday_rolls_back_to_friday():
+    """CRITICAL-1 (ana senaryo): hafta ici sabah, ACILIS ONCESI (09:00, acilis
+    10:00) -- eskiden yanlislikla 'bugun' donduruluyordu, ama bugunun HENUZ
+    hicbir bari yok (seans baslamadi). Tum kaynaklarin dunku/Cuma barlari
+    "beklenenden eski" sanilip guard'a duserdi -- seans acilisinda updater
+    warm-up turu + on-demand cache-miss TUM kaynaklari guard'a dusurup ilk
+    ~30 dk feed'i karartabilirdi (kanit: uctan uca simulasyon)."""
+    from app.market import last_trading_day
+
+    assert last_trading_day(_dt(2026, 7, 6, 9, 0)) == _dt(2026, 7, 3, 0, 0).date()
+
+
+def test_last_trading_day_after_close_weekday_is_today():
+    """Hafta ici, kapanis SONRASI (19:00) -- bugunun kapanisi zaten gelmis,
+    bugunun kapanis fiyati mesru -- bugun donmeli."""
+    from app.market import last_trading_day
+
+    assert last_trading_day(_dt(2026, 7, 6, 19, 0)) == _dt(2026, 7, 6, 0, 0).date()
 
 
 def test_last_trading_day_on_weekend_rolls_back_to_friday():

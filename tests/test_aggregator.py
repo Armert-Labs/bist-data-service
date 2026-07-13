@@ -56,8 +56,13 @@ class _TestAggregator(Aggregator):
     sanity-check, circuit breaker) test calistirma saatine bagli olarak
     kirilmaz (guard yalnizca seans ACIKKEN devreye girer)."""
 
-    async def fetch_quotes(self, symbols, previous=None, now=None):
-        return await super().fetch_quotes(symbols, previous=previous, now=now or _CLOSED_NOW)
+    async def fetch_quotes(self, symbols, previous=None, now=None, *, count_toward_cooldown=False):
+        return await super().fetch_quotes(
+            symbols,
+            previous=previous,
+            now=now or _CLOSED_NOW,
+            count_toward_cooldown=count_toward_cooldown,
+        )
 
 
 def _agg(providers):
@@ -65,7 +70,9 @@ def _agg(providers):
     agg._providers = [(p, CircuitBreaker(p.name)) for p in providers]
     agg._sanity_reject_since = {}
     agg._guard_drop_streak = {}
+    agg._guard_drop_streak_updated_at = {}
     agg._guard_cooldown_until = {}
+    agg._cycle_fully_dropped = None
     return agg
 
 
@@ -539,12 +546,28 @@ async def test_tradingview_fresh_bar_survives_default_chain_during_session():
     assert isyatirim.calls == 0  # TV'nin taze quote'u kabul edildi -- isyatirim'e hic dusulmedi
 
 
+async def _run_cycle(agg, symbols, *, now=None, batches=None):
+    """Test yardimcisi: begin_cycle/fetch_quotes(count_toward_cooldown=True)/
+    end_cycle sirasini tek bir 'tur' olarak simule eder -- gercek updater
+    kullanimini (bkz. updater.py) birebir yansitir. `batches` verilirse
+    `symbols` yerine her biri ayri bir fetch_quotes cagrisi (batch) olarak
+    kullanilir (HIGH-1: bir turda birden fazla batch)."""
+    agg.begin_cycle()
+    results = {}
+    for batch in batches or [symbols]:
+        res = await agg.fetch_quotes(batch, now=now, count_toward_cooldown=True)
+        results.update(res)
+    agg.end_cycle(now=now)
+    return results
+
+
 async def test_provider_enters_cooldown_after_repeated_full_guard_drop(override_settings):
     # MEDIUM-7: guard'in symbol_circuit muafiyeti (MEDIUM-3) dogruydu ama
     # bunun yaninda HICBIR fren kalmamisti -- seans icinde yapisal olarak
     # taze veri uretemeyen bir kaynak sonsuza kadar (her turda) sorulmaya
-    # devam ederdi (yuzlerce bosuna istek + tur butcesi). N tur ust uste
-    # TAMAMEN guard'la duserse kaynak cooldown'a alinmali.
+    # devam ederdi (yuzlerce bosuna istek + tur butcesi). N TUR ust uste
+    # TAMAMEN guard'la duserse kaynak cooldown'a alinmali (HIGH-1: TUR
+    # bazinda -- begin_cycle/end_cycle ile simule edilir).
     override_settings(guard_cooldown_fail_threshold=3, guard_cooldown_seconds=1800.0)
     frozen = FakeProvider(
         "isyatirim",
@@ -552,13 +575,13 @@ async def test_provider_enters_cooldown_after_repeated_full_guard_drop(override_
     )
     agg = _agg([frozen])
     for _ in range(3):
-        await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+        await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)
     assert frozen.calls == 3
     after = metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get()
     assert after == 1
 
     # Cooldown'dayken bir DAHA sorulmamali.
-    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)
     assert frozen.calls == 3
 
 
@@ -570,14 +593,14 @@ async def test_provider_cooldown_expires_and_retries(override_settings, fake_clo
     )
     agg = _agg([frozen])
     for _ in range(2):
-        await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+        await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)
     assert frozen.calls == 2
 
-    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)
     assert frozen.calls == 2  # cooldown'da, sorulmadi
 
     fake_clock.now += 200  # cooldown suresi (100sn) doldu
-    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)
     assert frozen.calls == 3  # tekrar sorulmaya baslandi
 
 
@@ -587,16 +610,185 @@ async def test_provider_streak_resets_on_recovery(override_settings):
     prov = FakeProvider("isyatirim", quotes)
     agg = _agg([prov])
 
-    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)  # 1. tam-guard-dusme
+    await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)  # 1. tam-guard-dusme (TUR 1)
     quotes["THYAO"] = Quote(symbol="THYAO", price=336.75, exchange_time=_TODAY_BAR)
-    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)  # iyilesme -- streak sifirlanir
+    res = await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)  # iyilesme -- streak sifirlanir
     assert res["THYAO"].price == 336.75
 
     quotes["THYAO"] = Quote(symbol="THYAO", price=999.0, exchange_time=_YESTERDAY_BAR)
-    await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)  # yeniden 1. tam-guard-dusme
+    await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)  # yeniden 1. tam-guard-dusme
     after = metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get()
     assert after == 0  # esik (2) henuz asilmadi -- streak gercekten sifirlanmisti
     assert prov.calls == 3  # hala cooldown'da degil, her seferinde soruldu
+
+
+async def test_cycle_collapses_multiple_batches_into_single_streak_increment(override_settings):
+    """HIGH-1 regresyon kilidi: bir TUR ~13 batch cagrisi uretebilir (updater
+    varsayilan BATCH_SIZE=40, ~500 sembol). Batch-bazli sayimda tek bir turda
+    esik (3) hemen asilirdi -- ayni turun 3 FARKLI batch'i, 3 AYRI TUR gibi
+    sayilmamali."""
+    override_settings(guard_cooldown_fail_threshold=3, guard_cooldown_seconds=1800.0)
+    frozen = FakeProvider(
+        "isyatirim",
+        {s: Quote(symbol=s, price=1.0, exchange_time=_YESTERDAY_BAR) for s in ("A", "B", "C")},
+    )
+    agg = _agg([frozen])
+    # TEK TUR icinde 3 batch (HER BIRI TAMAMEN guard'la dusuyor).
+    await _run_cycle(agg, None, now=_OPEN_NOW, batches=[["A"], ["B"], ["C"]])
+    assert frozen.calls == 3
+    after = metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get()
+    assert after == 0  # esik 3 ama bu AYNI turun 3 batch'i -- streak sadece 1 arti
+
+
+async def test_on_demand_call_never_counts_toward_cooldown(override_settings):
+    """HIGH-2 regresyon kilidi: on-demand (count_toward_cooldown=False,
+    varsayilan) cagrilar -- kac kez tekrarlanirsa tekrarlansin -- provider-
+    seviyesi cooldown'u ASLA tetiklememeli. Aksi halde bugun islem gormemis
+    TEK bir hissenin tekrarli on-demand sorgusu, koca bir kaynagi TUM
+    semboller icin cooldown'a sokabilirdi."""
+    override_settings(guard_cooldown_fail_threshold=1, guard_cooldown_seconds=1800.0)
+    frozen = FakeProvider(
+        "isyatirim",
+        {"THYAO": Quote(symbol="THYAO", price=344.5, exchange_time=_YESTERDAY_BAR)},
+    )
+    agg = _agg([frozen])
+    for _ in range(10):
+        await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)  # count_toward_cooldown=False (varsayilan)
+    after = metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get()
+    assert after == 0
+    assert frozen.calls == 10  # hicbir zaman cooldown'a girmedi
+
+
+async def test_guard_drop_during_opening_grace_does_not_count(override_settings, fake_clock):
+    """HIGH-1 acilis toleransi: seans acilisindan hemen sonraki pencerede
+    (GUARD_OPEN_GRACE_SECONDS) guard-dususleri streak'e YAZILMAZ -- kaynaklar
+    acilisin ilk saniyelerinde henuz dunku barlarini guncellemiyor olabilir
+    (yapisal gecikme, kalici ariza degil)."""
+    override_settings(guard_cooldown_fail_threshold=1, guard_open_grace_seconds=300.0)
+    # TR 10:01 -- acilistan (10:00) 60 sn sonra, grace penceresi (300 sn) icinde.
+    near_open = datetime(2026, 7, 6, 7, 1, tzinfo=UTC)
+    frozen = FakeProvider(
+        "isyatirim",
+        {"THYAO": Quote(symbol="THYAO", price=1.0, exchange_time=_YESTERDAY_BAR)},
+    )
+    agg = _agg([frozen])
+    await _run_cycle(agg, ["THYAO"], now=near_open)
+    after = metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get()
+    assert after == 0  # esik (1) olsa bile grace penceresinde sayilmadi
+
+
+async def test_guard_drop_streak_ages_out(override_settings, fake_clock):
+    """MEDIUM-2: streak'in yaslanmasi -- son artistan uzun sure (esik) sonra
+    yeni bir tam-dusme gelirse eski streak GECERSIZ sayilir (sifirdan
+    baslar) -- aksi halde sabah erken saatte birikmis bir streak saatlerce
+    durup ogleden sonraki TEK kotu turla cooldown'a donusebilirdi."""
+    override_settings(
+        guard_cooldown_fail_threshold=2,
+        guard_cooldown_seconds=1800.0,
+        guard_drop_streak_max_age_seconds=900.0,
+    )
+    frozen = FakeProvider(
+        "isyatirim",
+        {"THYAO": Quote(symbol="THYAO", price=1.0, exchange_time=_YESTERDAY_BAR)},
+    )
+    agg = _agg([frozen])
+    await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)  # 1. tam-dusme (streak=1)
+    fake_clock.now += 1000  # max_age (900 sn) asildi
+    await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)  # streak yaslanip sifirlandi, sonra 1 oldu
+    after = metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get()
+    assert after == 0  # esik (2) henuz asilmadi -- eski streak sayilmadi
+    assert frozen.calls == 2
+
+
+async def test_intraday_incapable_provider_skipped_entirely_while_market_open():
+    """YAPISAL ONERI: EOD-only (intraday_capable=False) kaynak seans acikken
+    HIC SORGULANMAZ -- guncelleme boyunca guard zaten her turda dusurecegi
+    icin sorgulamak yapisal olarak bosuna bir istektir."""
+
+    class EodOnly(FakeProvider):
+        intraday_capable = False
+
+    eod = EodOnly(
+        "isyatirim", {"THYAO": Quote(symbol="THYAO", price=1.0, exchange_time=_YESTERDAY_BAR)}
+    )
+    fresh = FakeProvider(
+        "yahoo_chart",
+        {
+            "THYAO": Quote(
+                symbol="THYAO", price=336.75, exchange_time=_TODAY_BAR, source="yahoo_chart"
+            )
+        },
+    )
+    agg = _agg([eod, fresh])
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 336.75
+    assert eod.calls == 0  # seans acikken HIC sorulmadi
+
+
+async def test_intraday_incapable_provider_still_asked_while_market_closed():
+    class EodOnly(FakeProvider):
+        intraday_capable = False
+
+    eod = EodOnly(
+        "isyatirim", {"THYAO": Quote(symbol="THYAO", price=1.0, exchange_time=_YESTERDAY_BAR)}
+    )
+    agg = _agg([eod])
+    res = await agg.fetch_quotes(["THYAO"], now=_CLOSED_NOW)
+    assert res["THYAO"].price == 1.0
+    assert eod.calls == 1  # kapali piyasada normal sorgulanir
+
+
+async def test_all_providers_guard_dropped_triggers_fail_open(override_settings):
+    """HIGH-3: BIRDEN FAZLA bagimsiz kaynak AYNI ANDA (ayni turda) TUM
+    sembolleri guard'la duserse -- bu tesadufi degildir, genellikle bir
+    kaynak arizasi degil "piyasa-acik varsayimimiz (tatil listesi?) yanlis"
+    sinyalidir. Guard bu tur icin fail-open yapilir: veri GECER (stale=true),
+    cooldown'a HICBIR provider GIRMEZ (sistemik sorun tek kaynaga atfedilmez)."""
+    override_settings(guard_cooldown_fail_threshold=1, guard_cooldown_seconds=1800.0)
+    before = metrics.GUARD_FAIL_OPEN._value.get()
+    stale_a = FakeProvider(
+        "yahoo_chart",
+        {
+            "THYAO": Quote(
+                symbol="THYAO", price=340.0, exchange_time=_YESTERDAY_BAR, source="yahoo_chart"
+            )
+        },
+    )
+    stale_b = FakeProvider(
+        "tradingview",
+        {
+            "THYAO": Quote(
+                symbol="THYAO", price=341.0, bar_time=_YESTERDAY_BAR, source="tradingview"
+            )
+        },
+    )
+    agg = _agg([stale_a, stale_b])
+    res = await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 340.0  # ilk kaynaktan (oncelik sirasi) fail-open ile geri alindi
+    assert res["THYAO"].stale is True
+    after = metrics.GUARD_FAIL_OPEN._value.get()
+    assert after == before + 1
+    assert metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="yahoo_chart")._value.get() == 0
+    assert metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="tradingview")._value.get() == 0
+
+
+async def test_single_provider_guard_drop_does_not_fail_open(override_settings):
+    """HIGH-3 sinir durumu: TEK kaynak yapilandirilmissa (veya tek kaynak
+    sorgulandiysa) fail-open TETIKLENMEMELI -- "yapisal olarak kisitli tek
+    kaynak" ile "takvim hatasi" birbirinden ayirt edilemez; guvenli varsayilan
+    normal cooldown yoludur (MEDIUM-7)."""
+    override_settings(guard_cooldown_fail_threshold=1, guard_cooldown_seconds=1800.0)
+    before = metrics.GUARD_FAIL_OPEN._value.get()
+    frozen = FakeProvider(
+        "isyatirim",
+        {"THYAO": Quote(symbol="THYAO", price=344.5, exchange_time=_YESTERDAY_BAR)},
+    )
+    agg = _agg([frozen])
+    res = await _run_cycle(agg, ["THYAO"], now=_OPEN_NOW)
+    assert "THYAO" not in res  # fail-open YOK -- normal guard-drop sonucu (bos)
+    after = metrics.GUARD_FAIL_OPEN._value.get()
+    assert after == before
+    assert metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get() == 1
 
 
 async def test_history_skips_non_history_provider_and_keeps_quotes():

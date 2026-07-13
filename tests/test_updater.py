@@ -14,7 +14,7 @@ async def test_update_once_writes_to_store(monkeypatch):
     store = MemoryStore()
     await store.connect()
 
-    async def fake_fetch(symbols, previous=None):
+    async def fake_fetch(symbols, previous=None, **kwargs):
         return {s: Quote(symbol=s, price=100.0) for s in symbols}
 
     async def no_sleep(*a, **k):
@@ -33,6 +33,45 @@ async def test_update_once_writes_to_store(monkeypatch):
     assert got.market_state in ("OPEN", "CLOSED")
 
 
+async def test_update_once_wraps_batches_in_single_cooldown_cycle(monkeypatch, override_settings):
+    """HIGH-1 uctan uca kablolama kaniti: _update_once TUM batch'leri
+    begin_cycle()/end_cycle() ile TEK bir 'tur' olarak aggregator'a bildirir
+    -- her fetch_quotes cagrisi count_toward_cooldown=True gecer. Bu, guard-
+    cooldown'un artik BATCH degil TUR bazinda degerlendirilmesinin (bkz.
+    aggregator.begin_cycle/end_cycle) uretim koduna dogru kablolandigini
+    dogrular (Aggregator'in kendi mantigi test_aggregator.py'de test edilir)."""
+    override_settings(batch_size=1)  # 3 sembol -> 3 AYRI batch cagrisi zorlanir
+    store = MemoryStore()
+    await store.connect()
+
+    calls = {"begin": 0, "end": 0, "fetch": []}
+
+    def fake_begin_cycle():
+        calls["begin"] += 1
+
+    def fake_end_cycle(now=None):
+        calls["end"] += 1
+
+    async def fake_fetch(symbols, previous=None, **kwargs):
+        calls["fetch"].append(kwargs.get("count_toward_cooldown"))
+        return {}
+
+    async def no_sleep(*a, **k):
+        return None
+
+    monkeypatch.setattr(updater_mod.aggregator, "begin_cycle", fake_begin_cycle)
+    monkeypatch.setattr(updater_mod.aggregator, "end_cycle", fake_end_cycle)
+    monkeypatch.setattr(updater_mod.aggregator, "fetch_quotes", fake_fetch)
+    monkeypatch.setattr(updater_mod.asyncio, "sleep", no_sleep)
+
+    up = BackgroundUpdater(symbols_list=["A", "B", "C"], store=store)
+    await up._update_once()
+
+    assert calls["begin"] == 1  # TUM tur icin TEK begin_cycle
+    assert calls["end"] == 1  # TUM tur icin TEK end_cycle
+    assert calls["fetch"] == [True, True, True]  # her batch count_toward_cooldown=True gecti
+
+
 async def test_update_once_passes_previous_for_sanity(monkeypatch):
     store = MemoryStore()
     await store.connect()
@@ -40,7 +79,7 @@ async def test_update_once_passes_previous_for_sanity(monkeypatch):
 
     seen_previous = {}
 
-    async def fake_fetch(symbols, previous=None):
+    async def fake_fetch(symbols, previous=None, **kwargs):
         seen_previous.update(previous or {})
         return {}
 
@@ -60,7 +99,7 @@ async def test_update_once_reports_quotes_by_source(monkeypatch):
     store = MemoryStore()
     await store.connect()
 
-    async def fake_fetch(symbols, previous=None):
+    async def fake_fetch(symbols, previous=None, **kwargs):
         return {
             "THYAO": Quote(symbol="THYAO", price=100.0, source="yahoo_chart"),
             "GARAN": Quote(symbol="GARAN", price=50.0, source="isyatirim"),
@@ -87,7 +126,7 @@ async def test_update_once_zeroes_out_source_with_no_hits_this_cycle(monkeypatch
 
     calls = {"n": 0}
 
-    async def fake_fetch(symbols, previous=None):
+    async def fake_fetch(symbols, previous=None, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             return {s: Quote(symbol=s, price=1.0, source="isyatirim") for s in symbols}
