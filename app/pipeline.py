@@ -39,14 +39,20 @@ def _pick_reference(
     own_source: str,
     provider_quotes: dict[str, dict[str, Quote]],
     now: datetime,
-) -> Quote | None:
+) -> tuple[Quote | None, str | None]:
     """Ilk-kazanir sirayla bagimsiz referans secer.
 
     Quote'un KENDI kaynagi asla referans olarak secilmez (H3: totolojik
     dogrulama -- ayni kaynagin yeni bir cagrisi hemen hemen hep ayni fiyati
     dondurur, bu da sahte "tutarli" gorunumu verir). Bayat bar dondüren
     kaynaklar da elenir (H2 guard'i referans yolunda da gecerli).
+
+    Bulunamazsa `(None, reason)` doner ve `bist_validate_no_reference_total`
+    sayacini reason etiketiyle artirir -- cross_validate_quotes/
+    run_drift_monitor/`/validate` AYNI cekirdegi kullandigi icin "temiz" ile
+    "hic bakilamadi" tum caginda ayni sekilde raporlanir (review MEDIUM-1).
     """
+    saw_stale = False
     for name in settings.validate_providers:
         if name == own_source:
             continue
@@ -54,9 +60,73 @@ def _pick_reference(
         if candidate is None:
             continue
         if is_stale_bar(candidate.exchange_time, now):
+            saw_stale = True
             continue
-        return candidate
-    return None
+        return candidate, None
+    reason = "stale" if saw_stale else "no_data"
+    metrics.VALIDATE_NO_REFERENCE.labels(reason=reason).inc()
+    return None, reason
+
+
+async def gather_reference_quotes(
+    syms: list[str], fetch_timeout: float = 8.0
+) -> tuple[dict[str, dict[str, Quote]], dict[str, str]]:
+    """Yapilandirilmis TUM `validate_providers`'i syms icin cekip
+    (provider -> {sembol: Quote}) + (provider -> durum metni) dondurur.
+
+    `/validate` (insan-teshis) ve yazma yolu (cross_validate_quotes) / arka
+    plan (run_drift_monitor) AYNI cekim mantigini kullanir -- eskiden 3 ayri
+    implementasyon farkli sonuc/gauge degeri uretebiliyordu (review MEDIUM-1).
+    """
+    provider_quotes: dict[str, dict[str, Quote]] = {}
+    status: dict[str, str] = {}
+    for name in settings.validate_providers:
+        provider = aggregator.get_provider(name)
+        if provider is None:
+            status[name] = "yapilandirilmamis"
+            continue
+        try:
+            fetched = await asyncio.wait_for(provider.fetch_quotes(syms), timeout=fetch_timeout)
+            provider_quotes[name] = fetched
+            status[name] = "ok" if fetched else "veri_yok"
+        except TimeoutError:
+            status[name] = "erisilemedi: timeout"
+        except Exception as exc:
+            status[name] = f"erisilemedi: {type(exc).__name__}"
+    return provider_quotes, status
+
+
+def compare_against_references(
+    primary: dict[str, Quote],
+    syms: list[str],
+    provider_quotes: dict[str, dict[str, Quote]],
+    now: datetime | None = None,
+) -> dict:
+    """Verdict cekirdegi: own-source-disli + bayat-filtreli referans
+    (`_pick_reference`) ile max sapma/tutarlilik hesaplar.
+
+    GAUGE YAZMAZ -- caller karar verir (run_drift_monitor yazar, `/validate`
+    salt-okunur insan-teshis endpoint'i oldugu icin yazmaz; review MEDIUM-1).
+    """
+    moment = now or datetime.now(UTC)
+    max_dev = 0.0
+    any_compared = False
+    for s in syms:
+        p = primary.get(s)
+        if p is None or p.price is None:
+            continue
+        ref, _reason = _pick_reference(s, p.source, provider_quotes, moment)
+        if ref is None or ref.price is None or ref.price == 0:
+            continue
+        dev = abs(p.price - ref.price) / ref.price * 100.0
+        max_dev = max(max_dev, dev)
+        any_compared = True
+    return {
+        "checked": len(syms),
+        "compared": any_compared,
+        "max_deviation_pct": round(max_dev, 3),
+        "consistent": any_compared and max_dev < settings.cross_validate_max_pct,
+    }
 
 
 async def cross_validate_quotes(
@@ -68,20 +138,12 @@ async def cross_validate_quotes(
 
     syms = list(quotes.keys())
     moment = now or datetime.now(UTC)
-    provider_quotes: dict[str, dict[str, Quote]] = {}
-    for name in settings.validate_providers:
-        provider = aggregator.get_provider(name)
-        if provider is None:
-            continue
-        try:
-            provider_quotes[name] = await asyncio.wait_for(provider.fetch_quotes(syms), timeout=8.0)
-        except Exception as exc:
-            logger.debug("Capraz-dogrulama kaynagi %s erisilemedi: %s", name, exc)
+    provider_quotes, _status = await gather_reference_quotes(syms)
 
     out: dict[str, Quote] = {}
     max_pct = settings.cross_validate_max_pct
     for s, q in quotes.items():
-        ref = _pick_reference(s, q.source, provider_quotes, moment)
+        ref, _reason = _pick_reference(s, q.source, provider_quotes, moment)
         if ref is None or ref.price is None or q.price is None or ref.price == 0:
             # Dogrulanamadi: bagimsiz referans yok (hepsi kendi kaynagi, bayat
             # veya erisilemez) -- SESSIZCE gecerli kabul edilir (fail-quiet;
@@ -161,7 +223,15 @@ async def fetch_and_commit(
 async def run_drift_monitor(
     store: Store, symbols: list[str] | None = None, now: datetime | None = None
 ) -> dict:
-    """Arka planda kaynaklar arasi sapma kontrolu (updater dongusu icin)."""
+    """Arka planda kaynaklar arasi sapma kontrolu (updater dongusu icin).
+
+    HIGH-3/MEDIUM-1: own-source disli + bayat-filtreli ayni cekirdegi
+    (`compare_against_references`) kullanir -- eskiden own-source disli
+    olmadigi icin bir kaynak kendi kendini dogrulayip VALIDATION_CONSISTENT
+    gauge'unu kalici 1'de birakabiliyordu. Bagimsiz referans hic yoksa
+    gauge'lara YAZILMAZ (eski deger korunur; 0 yazmak "gercekten tutarsiz"
+    ile "hic bakilamadi"yi ayirt edilemez hale getirirdi).
+    """
     syms = symbols or settings.drift_monitor_symbols or DRIFT_MONITOR_SYMBOLS
     moment = now or datetime.now(UTC)
     primary = await store.get_quotes(syms)
@@ -170,46 +240,18 @@ async def run_drift_monitor(
         fetched = await aggregator.fetch_quotes(missing)
         primary.update(fetched)
 
-    max_dev = 0.0
-    any_compared = False
-    for s in syms:
-        p = primary.get(s)
-        pp = p.price if p else None
-        if pp is None:
-            continue
-        for name in settings.validate_providers:
-            provider = aggregator.get_provider(name)
-            if provider is None:
-                continue
-            try:
-                ref = await asyncio.wait_for(provider.fetch_quotes([s]), timeout=8.0)
-            except Exception:
-                continue
-            r = ref.get(s)
-            # H2 guard'i burada da gecerli: bayat bar dondüren referans
-            # karsilastirmaya katilmaz (sahte drift alarmi uretmesin).
-            if r is None or is_stale_bar(r.exchange_time, moment):
-                continue
-            rp = r.price
-            if rp is not None and rp != 0:
-                dev = abs(pp - rp) / rp * 100.0
-                max_dev = max(max_dev, dev)
-                any_compared = True
+    provider_quotes, _status = await gather_reference_quotes(syms)
+    result = compare_against_references(primary, syms, provider_quotes, moment)
 
-    consistent = any_compared and max_dev < settings.cross_validate_max_pct
-    metrics.CROSS_SOURCE_DRIFT.set(round(max_dev, 3))
-    metrics.VALIDATION_CONSISTENT.set(1 if consistent else 0)
+    if result["compared"]:
+        metrics.CROSS_SOURCE_DRIFT.set(result["max_deviation_pct"])
+        metrics.VALIDATION_CONSISTENT.set(1 if result["consistent"] else 0)
+        if not result["consistent"]:
+            logger.warning(
+                "Drift monitörü: kaynaklar arasi max sapma %%%.2f (esik %%%.1f)",
+                result["max_deviation_pct"],
+                settings.cross_validate_max_pct,
+            )
+            metrics.DRIFT_ALERTS.inc()
 
-    if any_compared and not consistent:
-        logger.warning(
-            "Drift monitörü: kaynaklar arasi max sapma %%%.2f (esik %%%.1f)",
-            max_dev,
-            settings.cross_validate_max_pct,
-        )
-        metrics.DRIFT_ALERTS.inc()
-
-    return {
-        "checked": len(syms),
-        "max_deviation_pct": round(max_dev, 3),
-        "consistent": consistent,
-    }
+    return result

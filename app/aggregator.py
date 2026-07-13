@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 
 from . import metrics
 from .config import settings
-from .market import is_stale_bar
+from .market import is_market_open, is_stale_bar
 from .models import HistoryResponse, Quote
 from .providers.base import CircuitBreaker, Provider
 from .providers.isyatirim import IsYatirimProvider
@@ -202,7 +202,10 @@ class Aggregator:
             # sembolleri "hic gelmemis" say -- provider Quote ÜRETMEMIS gibi
             # davran, sonraki kaynaga (gapfill) dusulsun. Kapsama/circuit
             # muhasebesi (asagida) bu filtrelenmis fetched'e gore hesaplanir.
+            guard_dropped: set[str] = set()
+            market_open_now = is_market_open(moment)
             for s in [s for s, q in fetched.items() if is_stale_bar(q.exchange_time, moment)]:
+                guard_dropped.add(s)
                 metrics.STALE_BAR_SKIPPED.labels(provider=provider.name).inc()
                 logger.warning(
                     "%s bayat bar: sembol=%s exchange_time=%s (simdi=%s, seans acik) — "
@@ -211,6 +214,20 @@ class Aggregator:
                     s,
                     fetched[s].exchange_time,
                     moment.isoformat(),
+                )
+                del fetched[s]
+
+            # HIGH-1: seans acikken exchange_time hic URETEMEYEN kaynak da ayni
+            # kuraldan muaf olmamali -- canli olay: TradingView damgasiz oldugu
+            # icin guard'dan tamamen kaciyor, 2 yillik bayat bir fiyati "taze"
+            # diye servis ediyordu. Damgasiz veri seans icinde guvenilmez.
+            for s in [s for s, q in fetched.items() if market_open_now and q.exchange_time is None]:
+                guard_dropped.add(s)
+                metrics.MISSING_EXCHANGE_TIME.labels(provider=provider.name).inc()
+                logger.warning(
+                    "%s exchange_time yok: sembol=%s (seans acik) — quote atlandi",
+                    provider.name,
+                    s,
                 )
                 del fetched[s]
 
@@ -244,6 +261,13 @@ class Aggregator:
             for s in ask:
                 if s in fetched:
                     symbol_circuit.record_success(provider.name, s)
+                elif s in guard_dropped:
+                    # MEDIUM-3: guard'in dusurdugu (bayat bar / damgasiz) sembol
+                    # provider'in veri VEREMEDIGI anlamina gelmez -- "bugun
+                    # islem gormedi/damga yok" bir politika karari. HATA
+                    # yazilirsa 3 turda sembol_circuit acilir, gec islem goren
+                    # bir hisse damgasi duzelince bile 300sn atlanmis olur.
+                    continue
                 else:
                     symbol_circuit.record_failure(provider.name, s)
 

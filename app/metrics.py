@@ -53,3 +53,13 @@ STALE_BAR_SKIPPED = Counter(
 QUOTES_BY_SOURCE = Gauge(
     "bist_quotes_by_source", "Son guncelleme turunde kaynak basina yazilan quote sayisi", ["source"]
 )
+MISSING_EXCHANGE_TIME = Counter(
+    "bist_missing_exchange_time_total",
+    "Seans acikken exchange_time uretemeyen (damgasiz) kaynak nedeniyle atlanan quote sayisi",
+    ["provider"],
+)
+VALIDATE_NO_REFERENCE = Counter(
+    "bist_validate_no_reference_total",
+    "Bagimsiz referans bulunamadigi (kendi kaynagi/bayat/veri yok) icin dogrulanamayan karsilastirma",
+    ["reason"],
+)

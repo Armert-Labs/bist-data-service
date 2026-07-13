@@ -46,7 +46,12 @@ from .deps import fetch_semaphore, limiter, require_api_key
 from .logging_config import set_request_id, setup_logging
 from .market import is_market_open, market_state
 from .models import HistoryResponse, Quote
-from .pipeline import fetch_and_commit, fetch_quotes
+from .pipeline import (
+    compare_against_references,
+    fetch_and_commit,
+    fetch_quotes,
+    gather_reference_quotes,
+)
 from .store import get_store
 from .updater import updater
 from .webhooks import webhook_manager
@@ -93,7 +98,10 @@ def _with_live_state(q: Quote, state: str) -> Quote:
     mutasyona ugratilmaz (MemoryStore ayni nesneyi paylasir); bu alanlar her
     okumada degistigi icin artik HER zaman bir kopya doner."""
     reference = q.exchange_time or q.updated_at
-    age = (datetime.now(UTC) - reference).total_seconds() if reference else None
+    # MEDIUM-2: saat kaymasi / klemp bosluğu gibi uc durumlarda referans
+    # "simdi"den ileride kalabilir (orn. isyatirim'in kapanis-zamani tahmini);
+    # data_age_seconds negatif GORUNMEMELI.
+    age = max((datetime.now(UTC) - reference).total_seconds(), 0.0) if reference else None
     stale = age is not None and state == "OPEN" and age > settings.staleness_seconds
     return q.model_copy(
         update={
@@ -427,16 +435,31 @@ async def all_quotes(
     quotes.sort(key=key_fn, reverse=reverse)
 
     last_update = await store.last_update()
+    quotes_json: list[dict[str, Any]] = [
+        _with_live_state(q, state).model_dump(mode="json") for q in quotes
+    ]
     payload = {
         "market": state,
         "count": len(quotes),
         "last_update": last_update.isoformat() if last_update else None,
         "is_stale": await store.is_stale(),
         "delayed": True,
-        "quotes": [_with_live_state(q, state).model_dump(mode="json") for q in quotes],
+        "quotes": quotes_json,
     }
     body = json.dumps(payload, default=str).encode("utf-8")
-    etag = f'W/"{hashlib.sha256(body).hexdigest()[:16]}"'
+    # LOW-a: ETag data_age_seconds/stale gibi OKUMA ANINDA surekli degisen
+    # alanlardan degil, "gercek" veriden turetilmeli -- aksi halde fiyat hic
+    # degismese bile her cache-yenilemesinde ETag degisir ve 304 yolu hicbir
+    # zaman tetiklenmez.
+    etag_basis = {
+        **payload,
+        "quotes": [
+            {k: v for k, v in q.items() if k not in ("data_age_seconds", "stale")}
+            for q in quotes_json
+        ],
+    }
+    etag_source = json.dumps(etag_basis, default=str, sort_keys=True).encode("utf-8")
+    etag = f'W/"{hashlib.sha256(etag_source).hexdigest()[:16]}"'
     _all_cache[cache_key] = (now, body, etag)
     return _all_response(request, body, etag)
 
@@ -594,30 +617,12 @@ async def validate(
         async with fetch_semaphore:
             primary.update(await fetch_quotes(store, missing, cross_validate=False))
 
-    # Her bagimsiz referans kaynagi ayri ayri cek (biri erisilemezse digeri kalir).
-    references: dict[str, dict] = {}
-    reference_status: dict[str, str] = {}
-    for name in settings.validate_providers:
-        provider = aggregator.get_provider(name)
-        if provider is None:
-            reference_status[name] = "yapilandirilmamis"
-            references[name] = {}
-            continue
-        try:
-            # Erisilemeyen kaynak (orn. isyatirim yurtdisi IP) /validate'i kilitlemesin.
-            fetched = await asyncio.wait_for(provider.fetch_quotes(syms), timeout=8.0)
-            references[name] = fetched
-            reference_status[name] = "ok" if fetched else "veri_yok"
-        except TimeoutError:
-            references[name] = {}
-            reference_status[name] = "erisilemedi: timeout"
-        except Exception as exc:
-            references[name] = {}
-            reference_status[name] = f"erisilemedi: {type(exc).__name__}"
+    # /validate, run_drift_monitor ve cross_validate_quotes AYNI cekim/verdict
+    # cekirdegini kullanir (review MEDIUM-1) -- eskiden /validate kendi ayri
+    # implementasyonuyla farkli bir sonuc/gauge degeri uretebiliyordu.
+    references, reference_status = await gather_reference_quotes(syms)
 
     comparisons = []
-    max_dev = 0.0
-    any_compared = False
     for s in syms:
         p = primary.get(s)
         pp = p.price if p else None
@@ -630,33 +635,41 @@ async def validate(
         for name in settings.validate_providers:
             r = references.get(name, {}).get(s)
             rp = r.price if r else None
+            # Insan-teshis tablosu SEFFAFLIK icin TUM referanslari (kendi
+            # kaynagi ve bayat olanlar dahil) gosterir; "self" bayragi
+            # totolojik karsilastirmayi gorunur kilar. Asagidaki resmi
+            # verdict (max_deviation_pct/consistent) bunlari HARIC tutar.
+            is_self = p is not None and name == p.source
             if pp is not None and rp is not None and rp != 0:
                 dev = abs(pp - rp) / rp * 100.0
-                max_dev = max(max_dev, dev)
-                any_compared = True
                 row["references"][name] = {
                     "price": rp,
                     "deviation_pct": round(dev, 3),
                     "ok": dev < settings.cross_validate_max_pct,
+                    "self": is_self,
                 }
             else:
-                row["references"][name] = {"price": rp, "deviation_pct": None, "ok": False}
+                row["references"][name] = {
+                    "price": rp,
+                    "deviation_pct": None,
+                    "ok": False,
+                    "self": is_self,
+                }
         comparisons.append(row)
 
     # Esik, yazma dogrulamasiyla ayni ayardan gelir; operator degistirdiginde
-    # /validate raporu ile pipeline ayni dilde konusur.
-    consistent = any_compared and max_dev < settings.cross_validate_max_pct
-    metrics.CROSS_SOURCE_DRIFT.set(round(max_dev, 3))
-    metrics.VALIDATION_CONSISTENT.set(1 if consistent else 0)
+    # /validate raporu ile pipeline ayni dilde konusur. Bu salt-okunur
+    # insan-teshis endpoint'i GAUGE YAZMAZ (bkz. run_drift_monitor -- tek yazar).
+    verdict = compare_against_references(primary, syms, references)
 
     return {
         "checked": len(syms),
         # compared=false: 'tutarsiz' degil 'hicbir referansla KARSILASTIRILAMADI'.
-        "compared": any_compared,
+        "compared": verdict["compared"],
         "threshold_pct": settings.cross_validate_max_pct,
         "reference_status": reference_status,
-        "max_deviation_pct": round(max_dev, 3),
-        "consistent": consistent,
+        "max_deviation_pct": verdict["max_deviation_pct"],
+        "consistent": verdict["consistent"],
         "note": "erisilemeyen referanslar (orn. isyatirim yurtdisi IP'den) reference_status'ta gorulur.",
         "comparisons": comparisons,
     }

@@ -83,6 +83,13 @@ def is_stale_bar(exchange_time: datetime | None, now: datetime | None = None) ->
         return False
     if not is_market_open(now):
         return False
+    # LOW-b: Quote.exchange_time sozlesmesi UTC'dir. Naive (tzinfo'suz) bir
+    # deger gelirse -- beklenmedik ama savunma amacli -- datetime.astimezone()
+    # SUNUCUNUN YEREL SISTEM saat dilimini varsayardi; bu, sunucu TZ'sine gore
+    # yanlis gun karsilastirmasina yol acabilirdi. Naive girdi HER ZAMAN UTC
+    # sayilir (sunucu TZ'sinden bagimsiz).
+    if exchange_time.tzinfo is None:
+        exchange_time = exchange_time.replace(tzinfo=UTC)
     bar_date = exchange_time.astimezone(TR_TZ).date()
     return bar_date < _to_tr(now).date()
 

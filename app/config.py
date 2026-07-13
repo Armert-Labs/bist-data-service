@@ -167,10 +167,19 @@ class Settings:
 
     # /history onbellek TTL (sn)
     history_cache_ttl: float = field(default_factory=lambda: _get_float("HISTORY_CACHE_TTL", 600.0))
-    # /validate icin bagimsiz referans kaynaklar (birincilden farkli olmali).
-    # Erisilemeyen kaynaklar raporda "erisilemedi" olarak isaretlenir.
+    # /validate + yazma-zamani capraz-dogrulama + drift monitoru icin referans
+    # kaynaklar. Quote'un KENDI kaynagi _pick_reference tarafindan yapisal
+    # olarak DISLANIR (bkz. pipeline.py H3) -- bu yuzden en az 2 kaynak
+    # gerekir, aksi halde tek birincil kaynak (orn. yahoo_chart) seans
+    # boyunca HICBIR referans bulamaz (review HIGH-2: eski varsayim
+    # [yahoo_chart, isyatirim] ile isyatirim seans-ici bayat-bar guard'i
+    # (H2) yuzunden de elenince dogrulama fiilen tamamen olu kaliyordu).
+    # tradingview eklendi: exchange_time'i artik saglar (HIGH-1) ve seans
+    # icinde de canli veri dondurur.
     validate_providers: list[str] = field(
-        default_factory=lambda: _get_list("VALIDATE_PROVIDERS", ["yahoo_chart", "isyatirim"])
+        default_factory=lambda: _get_list(
+            "VALIDATE_PROVIDERS", ["yahoo_chart", "tradingview", "isyatirim"]
+        )
     )
 
     # --- Is Yatirim erisim ayarlari ---

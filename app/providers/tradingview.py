@@ -6,8 +6,8 @@ TradingView scanner de ayni cizgide bagimsiz bir kaynak/dogrulama saglar.
 Endpoint (quotes):
   POST https://scanner.tradingview.com/turkey/scan
   Govde: {"symbols":{"tickers":["BIST:THYAO","BIST:GARAN"],"query":{"types":[]}},
-          "columns":["lp","change_abs","change","volume","open","high","low","close"]}
-  Yanit: {"data":[{"s":"BIST:THYAO","d":[lp,change_abs,change,volume,open,high,low,close]}, ...]}
+          "columns":["lp","change_abs","change","volume","open","high","low","close","time"]}
+  Yanit: {"data":[{"s":"BIST:THYAO","d":[lp,change_abs,change,volume,open,high,low,close,time]}, ...]}
 
 Sembol esleme: bizim "THYAO" <-> TradingView "BIST:THYAO".
 Coklu sembol TEK POST'ta gonderilir (batch; Yahoo download gibi verimli).
@@ -18,8 +18,15 @@ NOT (M1 denetimi): "prev_close_price" kolonu bu /scan uc noktasinda desteklenmiy
 Dogru/calisan kolonlar "change_abs" (mutlak degisim) ve "change" (yuzde degisim);
 previous_close bunlardan AYNI yanit icinde turetilir (price - change_abs) --
 baska bir kaynaga/uca gidilmez. change_abs de null gelirse previous_close
-ACIKCA None birakilir + loglanir (bu, canliya cikmadan dogrulanamamis bir
-varsayimdir; sonraki canli denetimde teyit edilmeli).
+ACIKCA None birakilir + loglanir.
+
+NOT (review, HIGH-1): "lp" bu uc noktada SEANS ACIKKEN DE null geliyor (yalniz
+piyasa kapaliyken degil) -- TV fiilen hep "close" kolonunu dolduruyor, price
+neredeyse hep oraya duser. `time` kolonu (unix epoch, bar zamani) canli olarak
+dogrulandi ve exchange_time'a tasiniyor; bu, bayat-bar guard'inin (H2) bu
+kaynak icin de calismasini saglar -- onceden TradingView exchange_time
+uretmedigi icin guard'dan tamamen MUAFTI (canli olayda 2 yillik bayat bir
+fiyati "taze" diye servis etmesine yol acmisti).
 """
 
 from __future__ import annotations
@@ -37,9 +44,10 @@ logger = logging.getLogger(__name__)
 
 _SCANNER_URL = "https://scanner.tradingview.com/turkey/scan"
 # Kolon sirasi yanit `d[]` dizisiyle birebir eslesir (index -> alan).
-# lp=last price (canli, piyasa kapaliyken null); close=son kapanis (fallback).
-# change_abs/change: mutlak/yuzde degisim (eski "ch"/"chp" isimleri calismiyordu).
-_COLUMNS = ["lp", "change_abs", "change", "volume", "open", "high", "low", "close"]
+# lp=last price (bu uc noktada seans acikken de null gelebiliyor); close=son
+# kapanis (fiili fallback -- bkz. yukaridaki NOT). change_abs/change: mutlak/
+# yuzde degisim. time: bar zamani (unix epoch) -> exchange_time.
+_COLUMNS = ["lp", "change_abs", "change", "volume", "open", "high", "low", "close", "time"]
 _EXCHANGE = "BIST"
 _TIMEOUT = 10.0
 _HEADERS = {
@@ -101,6 +109,9 @@ def parse_quote(row: dict, columns: list[str] | None = None) -> Quote | None:
     else:
         logger.debug("tradingview %s: change_abs bos, previous_close hesaplanamiyor", bist)
 
+    time_epoch = _f(values.get("time"))
+    exchange_time = datetime.fromtimestamp(time_epoch, tz=UTC) if time_epoch else None
+
     return Quote(
         symbol=bist,
         price=round(price, 4),
@@ -115,6 +126,7 @@ def parse_quote(row: dict, columns: list[str] | None = None) -> Quote | None:
         source="tradingview",
         delayed=True,
         updated_at=datetime.now(UTC),
+        exchange_time=exchange_time,
     )
 
 

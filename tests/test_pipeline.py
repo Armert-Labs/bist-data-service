@@ -148,6 +148,72 @@ async def test_cross_validate_stale_reference_ignored_fail_quiet(monkeypatch):
     assert out["THYAO"].price == 336.75  # bayat referans yuzunden reddedilmedi
 
 
+async def test_cross_validate_prod_default_survives_isyatirim_staleness(monkeypatch):
+    """HIGH-2 regresyon guard (prod DEFAULT config, override YOK): eski
+    varsayimda ([yahoo_chart, isyatirim]) birincil yahoo_chart'tan gelince tek
+    olasi bagimsiz referans isyatirim'di; isyatirim seans icinde H2 bayat-bar
+    guard'i yuzunden elenirse dogrulama TAMAMEN olu kaliyordu. Yeni varsayima
+    eklenen tradingview bunu telafi eder."""
+
+    class YahooChartSelf:
+        name = "yahoo_chart"
+
+        async def fetch_quotes(self, symbols):
+            return {s: Quote(symbol=s, price=336.75, source="yahoo_chart") for s in symbols}
+
+    class StaleIsYatirim:
+        name = "isyatirim"
+
+        async def fetch_quotes(self, symbols):
+            return {
+                s: Quote(symbol=s, price=344.5, source="isyatirim", exchange_time=_YESTERDAY_BAR)
+                for s in symbols
+            }
+
+    class TradingViewRef:
+        name = "tradingview"
+
+        async def fetch_quotes(self, symbols):
+            return {s: Quote(symbol=s, price=337.0, source="tradingview") for s in symbols}
+
+    providers = {
+        "yahoo_chart": YahooChartSelf(),
+        "isyatirim": StaleIsYatirim(),
+        "tradingview": TradingViewRef(),
+    }
+    monkeypatch.setattr("app.pipeline.aggregator.get_provider", lambda name: providers.get(name))
+
+    quotes = {"THYAO": Quote(symbol="THYAO", price=336.75, source="yahoo_chart")}
+    out = await cross_validate_quotes(quotes, now=_OPEN_NOW)
+    # tradingview referans olarak bulunabildi (isyatirim bayat oldugu icin
+    # elendi) -- fiyat dogrulandi, sessizce "dogrulanamadi" DUSMEDI.
+    assert "THYAO" in out
+
+
+async def test_drift_monitor_prod_default_detects_real_drift(monkeypatch):
+    """HIGH-3 regresyon guard (prod DEFAULT config): own-source dislama
+    olmadan yahoo_chart kendini dogrulayip VALIDATION_CONSISTENT'i kalici 1'de
+    birakiyordu. Prod defaultla gercek bir sapma artik yakalanabilmeli."""
+    from app.pipeline import run_drift_monitor
+
+    store = MemoryStore()
+    await store.connect()
+    await store.set_quote("THYAO", Quote(symbol="THYAO", price=336.75, source="yahoo_chart"))
+
+    class TradingViewRef:
+        name = "tradingview"
+
+        async def fetch_quotes(self, symbols):
+            return {s: Quote(symbol=s, price=360.0, source="tradingview") for s in symbols}
+
+    providers = {"tradingview": TradingViewRef()}
+    monkeypatch.setattr("app.pipeline.aggregator.get_provider", lambda name: providers.get(name))
+
+    result = await run_drift_monitor(store, ["THYAO"], now=_OPEN_NOW)
+    assert result["consistent"] is False
+    assert result["max_deviation_pct"] > settings.cross_validate_max_pct
+
+
 async def test_fetch_and_commit_stamps_and_persists(monkeypatch):
     """Gercek zincir: fetch -> commit -> store'da updated_at + market_state."""
     from app.pipeline import fetch_and_commit

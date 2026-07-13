@@ -10,7 +10,7 @@
 > toplayan; Redis'te önbellekleyen; **REST + SSE + Prometheus** ile sunan üretim sınıfı
 > bir veri kaynağı mikroservisi. Login/oturum gerektirmez.
 
-Kaynaklar: **Yahoo Finance** (yfinance + v8 chart) + **İş Yatırım** (bağımsız fallback).
+Kaynaklar: **Yahoo Finance** (yfinance + v8 chart) + **TradingView** (scanner) + **İş Yatırım** (bağımsız fallback).
 
 ---
 
@@ -32,6 +32,7 @@ flowchart LR
     subgraph sources[Veri Kaynaklari]
         Y[Yahoo yfinance]
         YC[Yahoo v8 chart]
+        TV[TradingView scanner]
         IY[Is Yatirim]
     end
     U[updater\ncircuit breaker + sanity-check] -->|cek| sources
@@ -45,6 +46,24 @@ flowchart LR
 - **updater** — tek yazıcı; batch çeker, doğrular, Redis'e yazar, pub/sub yayınlar
 - **api** — stateless, N kopyaya ölçeklenir; Redis'ten okur, SSE'yi pub/sub ile besler
 - **Redis yoksa** — updater API içinde çalışır (tek instance, in-memory); `REDIS_URL` boş bırakın
+
+### 🕰️ Seans-içi kaynak zinciri gerçeği + bayat-veri düşürme politikası
+
+**İş Yatırım günlük EOD (End-Of-Day) çubuk döndürür** — gün içinde birden fazla
+kez sorgulansa da her seferinde *aynı günün* tek kapanış fiyatını verir. Seans
+**açıkken** bu artık kabul edilmez: her quote'un dayandığı veri noktası
+(`exchange_time`) bugüne ait değilse (piyasa açıkken) kaynak o sembol için
+**"hiç veri dönmemiş"** sayılır ve fallback zincirinde bir sonraki kaynağa
+düşülür (`bist_stale_bar_skipped_total`). Aynı kural, `exchange_time`
+**üretemeyen** bir kaynak için de geçerlidir (`bist_missing_exchange_time_total`)
+— damgasız veri seans içinde güvenilmez kabul edilir.
+
+Pratik sonucu: **seans içinde fiili canlı-fiyat zinciri `yahoo_chart` +
+`tradingview`'dir** — İş Yatırım yalnızca **piyasa kapalıyken** (son kapanış
+meşru veridir) devreye girer. Bu, bilinçli bir tasarım kararıdır (sessizce
+bayat fiyat servis etmek yerine açıkça düşürmek); `/ready`'deki `providers`
+durumu "sağlıklı" görünse bile bir sembolün seans içinde İş Yatırım'dan hiç
+veri gelmiyor olması **beklenen** davranıştır.
 
 ---
 
@@ -250,19 +269,31 @@ curl -H "X-API-Key: <anahtar>" "http://localhost:8000/validate?symbols=THYAO,GAR
   "checked": 2,
   "compared": true,
   "threshold_pct": 1.0,
-  "reference_status": { "yahoo_chart": "ok", "isyatirim": "ok" },
-  "max_deviation_pct": 0.0,
+  "reference_status": { "yahoo_chart": "ok", "tradingview": "ok", "isyatirim": "ok" },
+  "max_deviation_pct": 0.12,
   "consistent": true,
   "comparisons": [
     {
       "symbol": "THYAO",
       "primary": 348.25,
       "primary_source": "yahoo_chart",
-      "references": { "yahoo_chart": { "price": 348.25, "deviation_pct": 0.0, "ok": true } }
+      "references": {
+        "yahoo_chart": { "price": 348.25, "deviation_pct": 0.0, "ok": true, "self": true },
+        "tradingview": { "price": 347.83, "deviation_pct": 0.12, "ok": true, "self": false },
+        "isyatirim": { "price": 348.25, "deviation_pct": 0.0, "ok": true, "self": false }
+      }
     }
   ]
 }
 ```
+
+> **`self` alanı:** Quote'un KENDİ kaynağıyla karşılaştırılan referans (`self: true`)
+> her zaman ~%0 sapma verir (aynı kaynağın tekrar sorgulanmasıdır) — bu **totolojik**
+> bir kontroldür, gerçek bağımsız doğrulama DEĞİLDİR. Resmî `max_deviation_pct`/
+> `consistent` alanları bu girdiyi otomatik dışlar (yalnızca bağımsız — `self:
+> false` — referanslara bakar); tablo yalnızca **şeffaflık** için tüm referansları
+> gösterir. Bağımsız hiçbir referans yoksa (hepsi kendi kaynağı/bayat/erişilemez)
+> `compared:false` döner ("tutarsız" değil "karşılaştırılamadı").
 
 #### `GET /ready` — hazırlık yoklaması (probe, auth'suz)
 

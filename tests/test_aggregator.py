@@ -50,8 +50,18 @@ class FakeProvider(Provider):
         return HistoryResponse(symbol=symbol, period=period, interval=interval, bars=[])
 
 
+class _TestAggregator(Aggregator):
+    """`now` verilmezse gercek duvar-saati yerine SABIT kapali-seans anina
+    duser -- boylece HIGH-1/H2 guard'lariyla ilgisiz genel testler (failover,
+    sanity-check, circuit breaker) test calistirma saatine bagli olarak
+    kirilmaz (guard yalnizca seans ACIKKEN devreye girer)."""
+
+    async def fetch_quotes(self, symbols, previous=None, now=None):
+        return await super().fetch_quotes(symbols, previous=previous, now=now or _CLOSED_NOW)
+
+
 def _agg(providers):
-    agg = Aggregator.__new__(Aggregator)
+    agg = _TestAggregator.__new__(_TestAggregator)
     agg._providers = [(p, CircuitBreaker(p.name)) for p in providers]
     agg._sanity_reject_since = {}
     return agg
@@ -363,6 +373,36 @@ async def test_stale_bar_rejected_while_market_open_falls_back():
     assert after == before + 1
 
 
+async def test_tradingview_stale_bar_rejected_while_market_open_falls_back():
+    # HIGH-1 regresyon guard: TradingView artik `time` kolonundan exchange_time
+    # uretiyor (bkz. providers/tradingview.py); genel is_stale_bar kurali bu
+    # kaynak icin de gecerli olmali -- canli olayin tam tersi (eskiden
+    # TradingView damgasiz oldugu icin guard'dan MUAFTI).
+    stale_tv = FakeProvider(
+        "tradingview",
+        {
+            "THYAO": Quote(
+                symbol="THYAO", price=999.0, exchange_time=_YESTERDAY_BAR, source="tradingview"
+            )
+        },
+    )
+    fresh = FakeProvider(
+        "yahoo_chart",
+        {
+            "THYAO": Quote(
+                symbol="THYAO", price=336.75, exchange_time=_TODAY_BAR, source="yahoo_chart"
+            )
+        },
+    )
+    agg = _agg([stale_tv, fresh])
+    before = metrics.STALE_BAR_SKIPPED.labels(provider="tradingview")._value.get()
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 336.75
+    assert res["THYAO"].source == "yahoo_chart"
+    after = metrics.STALE_BAR_SKIPPED.labels(provider="tradingview")._value.get()
+    assert after == before + 1
+
+
 async def test_stale_bar_accepted_when_market_closed():
     # Seans kapaliyken son kapanis mesru veridir; bayat-bar guard'i devreye girmez.
     prov = FakeProvider(
@@ -384,13 +424,53 @@ async def test_todays_bar_accepted_while_market_open():
     assert res["THYAO"].price == 336.75
 
 
-async def test_stale_bar_without_exchange_time_not_filtered():
-    # exchange_time saglamayan kaynak (orn. TradingView) icin bu kural
-    # uygulanamaz -- guard'siz gecer.
+async def test_missing_exchange_time_rejected_while_market_open_falls_back():
+    # HIGH-1 (canli olay): exchange_time URETEMEYEN bir kaynak (eskiden
+    # TradingView) guard'dan tamamen MUAF kaliyordu -- 2 yillik bayat bir
+    # fiyat "taze" (stale=false, age~0) diye servis edildi. Artik seans
+    # ACIKKEN damgasiz quote da "hic gelmemis" sayilir, sonraki kaynaga dusulur.
+    no_stamp = FakeProvider("tradingview", {"THYAO": Quote(symbol="THYAO", price=999.0)})
+    fresh = FakeProvider(
+        "yahoo_chart",
+        {
+            "THYAO": Quote(
+                symbol="THYAO", price=336.75, exchange_time=_TODAY_BAR, source="yahoo_chart"
+            )
+        },
+    )
+    agg = _agg([no_stamp, fresh])
+    before = metrics.MISSING_EXCHANGE_TIME.labels(provider="tradingview")._value.get()
+    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    assert res["THYAO"].price == 336.75
+    assert res["THYAO"].source == "yahoo_chart"
+    after = metrics.MISSING_EXCHANGE_TIME.labels(provider="tradingview")._value.get()
+    assert after == before + 1
+
+
+async def test_missing_exchange_time_accepted_when_market_closed():
+    # Kapali seansta exchange_time zorunlulugu yok (tazelik zaten kural disi).
     prov = FakeProvider("tradingview", {"THYAO": Quote(symbol="THYAO", price=1.0)})
     agg = _agg([prov])
-    res = await agg.fetch_quotes(["THYAO"], now=_OPEN_NOW)
+    res = await agg.fetch_quotes(["THYAO"], now=_CLOSED_NOW)
     assert res["THYAO"].price == 1.0
+
+
+async def test_guard_dropped_symbol_does_not_trip_symbol_circuit():
+    # MEDIUM-3: guard'in dusurdugu (bayat bar / damgasiz) semboller
+    # symbol_circuit'e HATA olarak yazilmamali -- "bugun islem gormedi" veya
+    # "damga yok" provider'in o sembol icin veri VEREMEDIGI anlamina gelmez;
+    # aksi halde 3 turda sembol 300sn'lik bir devre-disi'na dusup gec islem
+    # goren hisseleri de gereksiz yere atlar.
+    from app.symbol_circuit import symbol_circuit
+
+    sym = "CIRCUITGUARD1"
+    prov = FakeProvider(
+        "isyatirim", {sym: Quote(symbol=sym, price=1.0, exchange_time=_YESTERDAY_BAR)}
+    )
+    agg = _agg([prov])
+    for _ in range(5):  # esik (varsayilan 3) asilacak kadar tekrar
+        await agg.fetch_quotes([sym], now=_OPEN_NOW)
+    assert symbol_circuit.allow("isyatirim", sym) is True
 
 
 async def test_history_skips_non_history_provider_and_keeps_quotes():

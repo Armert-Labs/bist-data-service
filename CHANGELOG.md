@@ -79,6 +79,58 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
     artık aynı yanıttaki `change_abs`'den türetiliyor (`price - change_abs`),
     başka bir kaynağa gidilmiyor. `change_abs` de boşsa alan açıkça `None`
     bırakılır + loglanır.
+- **Veri-doğruluk hardening review-fix turu (3 HIGH + 4 MEDIUM + 3 LOW):**
+  - **HIGH-1 (kritik kör nokta):** Canlı olayda TradingView `exchange_time`
+    üretmediği için H2 guard'dan tamamen MUAF kalıyordu; guard yahoo_chart'ı
+    (bayat) düşürünce gapfill TradingView'e geçiyor ve **2 yıllık bayat bir
+    fiyat `stale:false` ile servis ediliyordu**. Fix: TradingView `/scan`'in
+    `time` kolonu (unix epoch, canlı doğrulandı) artık `exchange_time`'a
+    taşınıyor. Ayrıca genel kural sıkılaştırıldı: seans içinde `exchange_time`
+    hiç üretemeyen (damgasız) bir quote da artık düşürülür
+    (`bist_missing_exchange_time_total{provider}`) — damgasız veri seans
+    içinde güvenilmez sayılır. `tradingview.py`'deki yanlış "lp piyasa
+    kapalıyken null olur" yorumu düzeltildi (canlı kanıt: seans açıkken de
+    null geliyor, TV fiilen hep `close` döndürüyor).
+  - **HIGH-2 (dogrulama seans içinde ölü):** Varsayılan `VALIDATE_PROVIDERS`
+    (`yahoo_chart,isyatirim`) ile birincil `yahoo_chart`'tan gelince tek olası
+    bağımsız referans `isyatirim` kalıyordu; o da H2 guard'ı yüzünden seans
+    içinde elenince doğrulama **tamamen ölü** kalıyordu. Varsayıma
+    `tradingview` eklendi (`yahoo_chart,tradingview,isyatirim`). Yeni
+    `bist_validate_no_reference_total{reason="stale"|"no_data"}` sayacı
+    "temiz" ile "hiç bakılamadı"yı ayırt eder.
+  - **HIGH-3 + MEDIUM-1 (drift monitörü + `/validate` totolojik/çelişkili):**
+    own-source dışlaması olmadan `run_drift_monitor` kendi kendini
+    doğrulayıp `bist_validation_consistent` gauge'unu kalıcı `1`'de
+    bırakabiliyordu; ayrıca `/validate` endpoint'i AYRI bir implementasyonla
+    aynı gauge'lara çelişen değer yazıyordu. Üç yol (yazma-zamanı
+    `cross_validate_quotes`, arka plan `run_drift_monitor`, insan-teşhis
+    `/validate`) artık TEK bir çekirdeği (`gather_reference_quotes` +
+    `compare_against_references` + `_pick_reference`, `pipeline.py`) paylaşır.
+    `/validate` artık gauge YAZMAZ (yalnızca `run_drift_monitor` yazar);
+    bağımsız referans yoksa gauge'lara hiç dokunulmaz (eski davranış: `0`
+    yazardı, bu "gerçekten tutarsız" ile "hiç bakılamadı"yı ayırt edilemez
+    kılıyordu). `/validate` yanıtındaki her referansa `self` bayrağı eklendi
+    (şeffaflık; totolojik girdi görünür kılınır, resmi verdict'i etkilemez).
+  - **MEDIUM-2:** İş Yatırım'ın kapanış-zamanı damgası (`market_close_time`)
+    bugüne ait bir bar için seans devam ederken GELECEK bir zaman
+    üretebiliyordu (`data_age_seconds` negatif görünürdü). Damga artık
+    `min(kapanış, şimdi)` ile sınırlanır; `_with_live_state` ayrıca
+    `data_age_seconds`'ı savunma amaçlı `0`'da klempler.
+  - **MEDIUM-3:** Guard'ın düşürdüğü (bayat bar / damgasız) semboller artık
+    `symbol_circuit`'e HATA olarak yazılmıyor — "bugün işlem görmedi" bir
+    politika kararıdır, provider'ın veri veremediği anlamına gelmez; aksi
+    halde sembol 3 turda 300sn'lik bir devre-dışına düşüp geç işlem gören
+    hisseleri gereksiz yere atlıyordu.
+  - **MEDIUM-4:** `docker-compose.yml`'de updater metrik portu artık
+    `0.0.0.0` yerine VM130'un iç arayüzüne (`10.10.10.130:8001:8001`)
+    bağlanıyor (Docker port publish, host firewall INPUT kurallarını
+    atlayabildiğinden tüm arayüzlere açmak firewall-dışı bir yüzeydi).
+  - **LOW:** `/all` ETag'i artık `data_age_seconds`/`stale` gibi okuma anında
+    sürekli değişen alanlardan değil yalnızca "gerçek" veriden türetiliyor
+    (aksi halde fiyat hiç değişmese bile her cache-yenilemesinde ETag
+    değişip 304 yolu hiç tetiklenmezdi); `market.is_stale_bar()` naive
+    (tzinfo'suz) `exchange_time`'ı artık sunucunun yerel saat diliminden
+    bağımsız her zaman UTC sayıyor.
 
 ## [0.1.0] - 2026-07-05
 

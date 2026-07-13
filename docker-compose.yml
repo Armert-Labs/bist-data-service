@@ -28,8 +28,12 @@ services:
       disable: true
     # Prometheus (VM140) icin updater metrik portu -- host'a publish edilir.
     # Sadece 'expose' iken compose-agi DISINDAN (VM140) scrape edilemiyordu (H1).
+    # MEDIUM-4: 0.0.0.0 yerine VM130'un ic arayuzune (10.10.10.130) baglanir --
+    # Docker publish, host firewall INPUT kurallarini ATLAYABILIR (iptables
+    # DOCKER-USER zincirinden once NAT'lanir); tum arayuzlere acmak bunu
+    # firewall-disi bir yuzey yapar.
     ports:
-      - "8001:8001"
+      - "10.10.10.130:8001:8001"
     # Webhook kullanmak icin: webhooks.json olusturun ve asagidaki satiri acin.
     # volumes:
     #   - ./webhooks.json:/app/webhooks.json:ro

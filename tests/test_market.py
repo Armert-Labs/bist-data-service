@@ -98,3 +98,43 @@ def test_is_stale_bar_accepts_utc_exchange_time():
     # asagida acik ornek: UTC 03-07 15:15 = TR 03-07 18:15, dunku TR kapanisi).
     yesterday_close_utc = datetime(2026, 7, 3, 15, 15, tzinfo=UTC)
     assert is_stale_bar(yesterday_close_utc, _dt(2026, 7, 6, 12, 0)) is True
+
+
+def test_is_stale_bar_naive_exchange_time_independent_of_system_tz():
+    # LOW-b: exchange_time tzinfo tasimiyorsa (beklenmedik/savunma amacli durum)
+    # naive datetime.astimezone() Python'da SUNUCUNUN YEREL SISTEM saatini
+    # varsayar -- ayni naive deger, sunucu TZ'sine gore FARKLI bir gune
+    # yuvarlanabilir. Quote modelinin sozlesmesi UTC'dir; naive girdi HER
+    # ZAMAN UTC sayilmali, yani sonuc sistem TZ'sinden BAGIMSIZ olmali. Bunu
+    # dogrulamak icin sistem TZ'sini iki UC noktaya (New York / Kiritimati,
+    # ~18 saat fark) gecici olarak degistirip sonucun degismedigini kontrol
+    # ederiz (ambient +03 gelistirme ortaminda tesadufen "doğru" gorunmesin).
+    import os
+    import time as time_mod
+    from datetime import datetime
+
+    from app.market import is_stale_bar
+
+    # Gece yarisina yakin bir naive deger + ertesi gun (Sali) "simdi": iki asiri
+    # TZ yorumu (New York / Kiritimati) FARKLI gunlere yuvarlanacak sekilde
+    # secildi (biri "dun", digeri "bugun" -> stale/degil FARKLI cikar) --
+    # bug varsa test bunu yakalar, fix'liyken ikisi de UTC varsayimina gore
+    # AYNI (dogru) sonucu vermeli.
+    naive = datetime(2026, 7, 6, 23, 30)  # tzinfo YOK
+    now = _dt(2026, 7, 7, 12, 0)
+    original_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/New_York"
+        time_mod.tzset()
+        result_ny = is_stale_bar(naive, now)
+
+        os.environ["TZ"] = "Pacific/Kiritimati"
+        time_mod.tzset()
+        result_kiritimati = is_stale_bar(naive, now)
+    finally:
+        if original_tz is not None:
+            os.environ["TZ"] = original_tz
+        else:
+            os.environ.pop("TZ", None)
+        time_mod.tzset()
+    assert result_ny == result_kiritimati
