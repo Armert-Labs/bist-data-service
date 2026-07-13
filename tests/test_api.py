@@ -182,6 +182,64 @@ def test_ready_oldest_quote_age_reflects_real_bar_age_after_fail_open(
         assert body["oldest_quote_age_seconds"] > 3600 * 15
 
 
+def test_ready_ok_during_opening_grace_after_fail_open(monkeypatch, override_settings):
+    """HIGH-1 (review-4, REGRESYON) uctan uca kilit testi: veri ~15 dk
+    gecikmeli oldugu icin acilisin ilk ~15 dk'sinda TUM sembollerin guard'la
+    dusup fail-open ile stale=true commit edilmesi BEKLENEN bir durumdur --
+    eskiden `store.is_stale()`'in KENDI acilis toleransi (`STALENESS_SECONDS`,
+    vars. 300 sn) veri gecikmesinden (900 sn) kisa oldugu icin bu durumda
+    bile `/ready` 503 donup HER ISLEM GUNU critical alarm uretiyordu. Artik
+    tolerans `GUARD_OPEN_GRACE_SECONDS` (vars. 1200 sn) ile hizali -- acilisin
+    ilk 20 dk'sinda (fail-open'in fiilen calistigi tum sure) `/ready` 200
+    doner, veri `stale=true` isaretiyle servis edilir (BEKLENEN)."""
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    override_settings(staleness_min_fresh_pct=90.0, guard_open_grace_seconds=1200.0)
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 300.0)  # acilistan 5 dk
+    store = get_store()
+    now = datetime.now(UTC)
+    quotes = {
+        f"S{i:02d}": Quote(symbol=f"S{i:02d}", price=1.0, updated_at=now, stale=True)
+        for i in range(20)
+    }
+    store._quotes = quotes
+    store._last_update = now
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ready"] is True
+        assert body["is_stale"] is False
+
+
+def test_ready_not_ready_after_opening_grace_expires(monkeypatch, override_settings):
+    """Karsit durum: acilis toleransi penceresi DISINDA (>= GUARD_OPEN_GRACE_
+    SECONDS) hala TUM sembol bayatsa bu GERCEK bir sorundur -- `/ready` 503
+    donmeye devam eder (regresyona geri donmedi)."""
+    from datetime import UTC, datetime
+
+    from app.models import Quote
+    from app.store import get_store
+
+    override_settings(staleness_min_fresh_pct=90.0, guard_open_grace_seconds=1200.0)
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 1500.0)  # acilistan 25 dk
+    store = get_store()
+    now = datetime.now(UTC)
+    quotes = {
+        f"S{i:02d}": Quote(symbol=f"S{i:02d}", price=1.0, updated_at=now, stale=True)
+        for i in range(20)
+    }
+    store._quotes = quotes
+    store._last_update = now
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 503
+        assert r.json()["detail"]["is_stale"] is True
+
+
 def test_symbols_list():
     with TestClient(app) as c:
         body = c.get("/symbols").json()

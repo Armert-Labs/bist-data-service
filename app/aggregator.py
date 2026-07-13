@@ -136,32 +136,6 @@ class Aggregator:
         )
         return False
 
-    def _internally_consistent(self, quote: Quote, previous: dict[str, float] | None) -> bool:
-        """CRITICAL-1(a): kaynagin KENDI `previous_close`'u yeni `price` ile
-        tutarliysa VE bu restated previous_close BIZIM bildigimiz onceki
-        fiyattan da onemli olcude farkliysa kabul edilir -- kaynak "baz fiyat
-        degisti (bedelsiz/split), ben previous_close'umu da duzelttim" diyor
-        demektir. Ikinci sart ZORUNLU: yalniz price~previous_close tutarliligi
-        (ilk sart) HER NORMAL quote'ta da trivially dogru olur -- ayirt edici
-        olan kaynagin BAZININ da (previous_close) degismis olmasidir. Tek
-        kaynak dunyasinda coklu-kaynak sartina (candidates>=2) BAGIMLI DEGILDIR.
-        """
-        prev_close = quote.previous_close
-        our_prev = (previous or {}).get(quote.symbol)
-        if (
-            prev_close is None
-            or prev_close == 0
-            or quote.price is None
-            or our_prev is None
-            or our_prev == 0
-        ):
-            return False
-        own_change_pct = abs((quote.price - prev_close) / prev_close * 100.0)
-        if own_change_pct > settings.sanity_max_change_percent:
-            return False
-        baseline_shift_pct = abs((prev_close - our_prev) / our_prev * 100.0)
-        return baseline_shift_pct > settings.sanity_max_change_percent
-
     def _update_persist_and_check(self, symbol: str, quote: Quote) -> bool:
         """CRITICAL-1(b): ayni kaynak SANITY_ESCAPE_PERSIST_ROUNDS ardisik
         TURDA (her `fetch_quotes()` cagrisinda -- provider basina degil,
@@ -204,21 +178,34 @@ class Aggregator:
         self._sanity_reject_since.pop(symbol, None)
         self._sanity_persist.pop(symbol, None)
 
-    def _try_escape(
-        self, symbol: str, candidates: list[Quote], previous: dict[str, float] | None
-    ) -> Quote | None:
+    def _try_escape(self, symbol: str, candidates: list[Quote]) -> Quote | None:
         """Kesintisiz sanity reddi altindaki bir sembolun kabul edilme yollari.
 
-        (a) Ic tutarlilik (CRITICAL-1a): bkz. `_internally_consistent`.
-        (b) Israr teyidi (CRITICAL-1b): bkz. `_update_persist_and_check`.
-        (c) Coklu-kaynak uzlasisi (Faz-2, birden fazla BAGIMSIZ kaynak varsa):
+        (a) Israr teyidi (CRITICAL-1b): bkz. `_update_persist_and_check`. Tek
+            intraday kaynakli dunyada (bkz. config.py PROVIDERS yorumu) bu
+            dunyanin TEK canli escape yoludur.
+        (b) Coklu-kaynak uzlasisi (Faz-2, birden fazla BAGIMSIZ kaynak varsa):
             kesintisiz red penceresi (SANITY_REJECT_ESCAPE_SECONDS) dolduysa
             VE en az iki kaynak yeni fiyatta uzlasiyorsa ilk adayi kabul eder.
             Tek kaynakli dunyada `candidates` hep <2 kalir, bu yol hicbir
-            zaman tetiklenmez -- (a)/(b) bu dunyanin TEK canli escape yoludur.
+            zaman tetiklenmez.
+
+        HIGH-2 (review-4, GUVENLIK): eskiden ucuncu bir yol daha vardi --
+        kaynagin KENDI `previous_close`'unun yeni `price` ile tutarli olmasina
+        (VE bizim bildigimizden onemli olcude farkli olmasina) dayanan "ic
+        tutarlilik" escape'i, TEK TURDA teyitsiz kabul ediyordu. Kanitlanmis
+        acik: yanlis-birim/yanlis-enstruman (orn. kaynak THYAO icin USD
+        satirini donerse: price=2.50, previous_close=2.40 -- ikisi BIRLIKTE
+        kaydigi icin kendi icinde tutarli GORUNUR VE bizim TRY fiyatimizdan
+        [orn. 100] "onemli olcude farkli" da GORUNUR) tam da guard'in var olus
+        sebebi olan hata sinifini escape'in KENDI anahtarina cevirir -- tek
+        bir bozuk turda (60 sn) client-side stop-loss'u besleyen feed'e
+        sessizce sizar. Bu yol KALDIRILDI; israr teyidi (3 tur, ~3 dk gecikme)
+        kabul edilen tek yoldur -- gecici/bozuk bir payload 3 ardisik turda
+        israr etmez, gercek kurumsal islem (bedelsiz/split) eder.
 
         Bu fonksiyon sembol basina fetch_quotes() CAGRISI basina TAM OLARAK
-        BIR KEZ cagrilir (rejected sozlugunde bir kez) -- (b)'nin ardisik-TUR
+        BIR KEZ cagrilir (rejected sozlugunde bir kez) -- (a)'nin ardisik-TUR
         sayaci bu yuzden PROVIDER-bazli degil CAGRI-bazli ilerler (bir batch
         icinde ayni sembol icin birden fazla kaynak denenmis olsa bile).
 
@@ -230,10 +217,6 @@ class Aggregator:
         base = candidates[0]
         if base.price is None:
             return None
-
-        if self._internally_consistent(base, previous):
-            self._accept_escape(symbol, base, "consistency")
-            return base
 
         if self._update_persist_and_check(symbol, base):
             self._accept_escape(symbol, base, "persistence")
@@ -293,7 +276,7 @@ class Aggregator:
         self._cycle_guard_dropped_candidates = {}
         self._cycle_previous = {}
 
-    def end_cycle(self, now: datetime | None = None) -> dict[str, Quote]:
+    def end_cycle(self, now: datetime | None = None, *, aborted: bool = False) -> dict[str, Quote]:
         """Tur sonunda (tum batch'ler bitince) biriken durumu DEGERLENDIRIR.
 
         `begin_cycle()` cagrilmadiysa no-op (savunma amacli), bos dict doner.
@@ -313,9 +296,32 @@ class Aggregator:
         On-demand cagrilar begin_cycle() hic cagirmadigi icin bu yola HICBIR
         ZAMAN giremez (cycle state'i mevcut degildir).
 
-        Acilis toleransi (`GUARD_OPEN_GRACE_SECONDS`): seans acilisindan
-        hemen sonraki pencerede tam guard-dususleri streak'e YAZILMAZ -- guard
-        yine calisir (bayat/damgasiz veri gecmez), yalniz cooldown'u TETIKLEMEZ.
+        `aborted` (MEDIUM-1/LOW-1, review-4): tur iptal/timeout (updater_
+        cycle_timeout) veya erken durdurma (`BackgroundUpdater.stop()`) ile
+        YARIM kaldiysa True gecilir -- boyle bir turda "hicbir sembol taze
+        quote almadi" olcusu YALNIZCA kosulan az sayida batch'e dayanir,
+        TUM watchlist icin sistemik kanit SAYILMAZ (bkz. review: 14 batch'ten
+        2'si kosarsa trivially "hepsi guard'a dustu" gorunur). `aborted=True`
+        iken fail-open VE provider guard-drop streak degerlendirmesi HIC
+        YAPILMAZ -- ne metrik ne CRITICAL log ne commit; cagiran (updater)
+        hicbir sey commit etmez, bir sonraki (tam) turda normal degerlendirme
+        kaldigi yerden devam eder.
+
+        Acilis toleransi (`GUARD_OPEN_GRACE_SECONDS`): HIGH-1 (review-4,
+        REGRESYON): veri ~15 dk gecikmeli oldugu icin acilisin ilk ~15
+        dakikasinda kaynagin regularMarketTime'i hala dunku/Cuma gunune ait
+        olabilir -- guard TUM sembolleri duser, bu pencerede fail-open HER
+        ISLEM GUNU rutin olarak tetiklenir (bu BEKLENEN bir durumdur, ariza
+        degildir). Acilis toleransi penceresindeyken fail-open quote'lari
+        YINE dondurulur (veri sürekliligi, `stale=true` ile) AMA
+        `bist_guard_fail_open_total` sayaci artirilmaz ve CRITICAL log
+        basilmaz -- aksi halde bu sayac/log her sabah rutin olarak ates
+        alir, gercek bir takvim-hatasi (bilinmeyen resmi tatil) sinyalinden
+        ayirt edilemez hale gelirdi (alarm yorgunlugu). Pencere disinda
+        (eskisi gibi) sayac + CRITICAL log basilir. Provider guard-drop
+        streak'i icin de ayni pencere kullanilir: tam guard-dususleri
+        streak'e YAZILMAZ -- guard yine calisir (bayat/damgasiz veri gecmez),
+        yalniz cooldown'u TETIKLEMEZ.
 
         LOW-2: bu turda fail-open tetiklendiyse TUM turun guard-drop
         degerlendirmesi (provider streak/cooldown) atlanir -- fail-open
@@ -333,6 +339,17 @@ class Aggregator:
         self._cycle_previous = None
         if accumulated is None:
             return {}
+        if aborted:
+            logger.debug(
+                "Tur iptal/timeout veya erken durdurma ile yarim kaldi -- "
+                "kismi veri sistemik kanit SAYILMAZ; fail-open/guard-drop "
+                "streak degerlendirmesi bu tur icin ATLANDI."
+            )
+            return {}
+
+        moment = now or datetime.now(UTC)
+        since_open = seconds_since_open(moment)
+        in_grace = since_open is not None and since_open < settings.guard_open_grace_seconds
 
         fail_open_result: dict[str, Quote] = {}
         if (
@@ -349,15 +366,27 @@ class Aggregator:
                     q.stale = True
                     fail_open_result[s] = q
             if fail_open_result:
-                metrics.GUARD_FAIL_OPEN.inc()
-                logger.critical(
-                    "%d sembolluk bir TURDA (esik %d) hicbir kaynak taze veri "
-                    "uretemedi -- piyasa-acik varsayimi (tatil listesi/"
-                    "last_trading_day?) hatali olabilir; guard bu TUR icin "
-                    "FAIL-OPEN yapildi (veri geciyor, cooldown tetiklenmedi).",
-                    len(fail_open_result),
-                    settings.guard_fail_open_min_symbols,
-                )
+                if in_grace:
+                    logger.info(
+                        "%d sembolluk bir TURDA (esik %d) hicbir kaynak taze "
+                        "veri uretemedi -- acilis-toleransi penceresinde "
+                        "(< %.0f sn), bu BEKLENEN bir durumdur (veri ~15 dk "
+                        "gecikmeli); veri sürekliligi icin fail-open ile "
+                        "gecirildi ama sayac/CRITICAL log basilmadi.",
+                        len(fail_open_result),
+                        settings.guard_fail_open_min_symbols,
+                        settings.guard_open_grace_seconds,
+                    )
+                else:
+                    metrics.GUARD_FAIL_OPEN.inc()
+                    logger.critical(
+                        "%d sembolluk bir TURDA (esik %d) hicbir kaynak taze veri "
+                        "uretemedi -- piyasa-acik varsayimi (tatil listesi/"
+                        "last_trading_day?) hatali olabilir; guard bu TUR icin "
+                        "FAIL-OPEN yapildi (veri geciyor, cooldown tetiklenmedi).",
+                        len(fail_open_result),
+                        settings.guard_fail_open_min_symbols,
+                    )
 
         if fail_open_result:
             logger.debug(
@@ -366,9 +395,6 @@ class Aggregator:
             )
             return fail_open_result
 
-        moment = now or datetime.now(UTC)
-        since_open = seconds_since_open(moment)
-        in_grace = since_open is not None and since_open < settings.guard_open_grace_seconds
         for provider_name, fully_dropped in accumulated.items():
             self._apply_cycle_guard_result(provider_name, fully_dropped, in_grace)
         return fail_open_result
@@ -703,7 +729,7 @@ class Aggregator:
         for s, candidates in rejected.items():
             if s in result:
                 continue
-            escaped = self._try_escape(s, candidates, previous)
+            escaped = self._try_escape(s, candidates)
             if escaped is not None:
                 result[s] = escaped
 

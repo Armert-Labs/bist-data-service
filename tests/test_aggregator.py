@@ -287,34 +287,40 @@ async def test_sanity_escape_timer_resets_on_accept(override_settings, fake_cloc
     assert "THYAO" not in res  # yeni pencere; hemen kacis olmamali
 
 
-async def test_single_source_escape_via_previous_close_consistency(override_settings):
-    """CRITICAL-1(a): kaynak KENDI previous_close'unu da yeni fiyatla TUTARLI
-    sekilde duzeltirse (bedelsiz/split imzasi) TEK turda, TEK kaynaktan,
-    ISRAR/zaman penceresi beklemeden ANINDA kabul edilir. THYAO 200 TL iken
-    %300 bedelsiz sonrasi kaynak 50 TL + previous_close=48 (kendi restated
-    onceki kapanisi) donduruyor -- 200->50 sicramasi BIZIM previous'umuza
-    (200) gore absurt (%75) ama kaynagin KENDI previous_close'una (48) gore
-    normal (%4.2)."""
-    before = metrics.SANITY_ESCAPES.labels(
-        provider="yahoo_chart", reason="consistency"
-    )._value.get()
-    quote = Quote(symbol="THYAO", price=50.0, previous_close=48.0, source="yahoo_chart")
-    agg = _agg([FakeProvider("yahoo_chart", {"THYAO": quote})])
-    res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 200.0})
-    assert res["THYAO"].price == 50.0
-    after = metrics.SANITY_ESCAPES.labels(provider="yahoo_chart", reason="consistency")._value.get()
-    assert after == before + 1
-
-
-async def test_previous_close_consistency_rejects_unchanged_baseline(override_settings):
-    """CRITICAL-1(a) guvenlik: previous_close BIZIM bildigimiz onceki fiyattan
-    (100) onemli olcude farkli DEGILSE (yani kaynak bir "baz degisikligi"
-    bildirmiyor) escape TETIKLENMEMELI -- yalniz price~previous_close
-    tutarliligina bakmak HER NORMAL quote'ta da trivially dogru olurdu."""
-    quote = Quote(symbol="THYAO", price=999.0, previous_close=100.5, source="yahoo_chart")
+async def test_wrong_currency_payload_not_accepted_on_first_round(override_settings):
+    """HIGH-2 (review-4, GUVENLIK): eski `_internally_consistent` (CRITICAL-1a)
+    escape'i KALDIRILDI -- kanitlanmis acik: kaynak THYAO icin yanlislikla bir
+    USD satiri dondururse (price=2.50, previous_close=2.40) bu ikisi BIRLIKTE
+    kaydigi icin kendi icinde tutarli GORUNUR (%4.2 degisim) VE previous_close
+    bizim TRY fiyatimizdan (100) da "onemli olcude farkli" GORUNUR -- eski
+    tasarim bunu TEK TURDA, teyitsiz "bedelsiz/split" sanip kabul ediyordu.
+    Guard'in var olus sebebi olan hata sinifinin (yanlis-birim/yanlis-
+    enstruman) TAM KENDISI escape'i aciyordu. Artik boyle bir payload ILK
+    turda REDDEDILIR (yalniz israr teyidi -- 3 ardisik tur -- kalan tek yol)."""
+    quote = Quote(symbol="THYAO", price=2.50, previous_close=2.40, source="yahoo_chart")
     agg = _agg([FakeProvider("yahoo_chart", {"THYAO": quote})])
     res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
     assert "THYAO" not in res
+
+
+async def test_wrong_currency_payload_eventually_escapes_if_it_persists(
+    override_settings, fake_clock
+):
+    """HIGH-2 tamamlayici: kaldirilan (a) yolunun yerini alan israr teyidi
+    (b) mutlak bir garanti degildir -- BOZUK bir payload da GERCEKTEN 3
+    ardisik tur (~3 dk) israr ederse escape eder (kabul edilen taviz: bu,
+    tek-turluk ANINDA kabulden cok daha yuksek bir bar'dir ve gecici/rastgele
+    bir hata 3 dk boyunca ayni degeri tekrarlamaz; PM/reviewer bu gecikmeyi
+    kabul edilebilir buluyor -- bkz. review)."""
+    override_settings(sanity_escape_persist_rounds=3)
+    quotes = {"THYAO": Quote(symbol="THYAO", price=2.50, previous_close=2.40, source="yahoo_chart")}
+    agg = _agg([FakeProvider("yahoo_chart", quotes)])
+    assert "THYAO" not in await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
+    fake_clock.now += 60
+    assert "THYAO" not in await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
+    fake_clock.now += 60
+    res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
+    assert res["THYAO"].price == 2.50  # 3. turda israr teyidiyle kabul (reason=persistence)
 
 
 async def test_history_falls_back_to_source_with_bars():
@@ -827,6 +833,57 @@ async def test_guard_drop_during_opening_grace_does_not_count(override_settings,
     assert after == 0  # esik (1) olsa bile grace penceresinde sayilmadi
 
 
+async def test_fail_open_within_opening_grace_skips_metric_and_log(override_settings):
+    """HIGH-1 (review-4, REGRESYON) kilit testi: veri ~15 dk gecikmeli oldugu
+    icin acilisin ilk ~15 dk'sinda kaynagin regularMarketTime'i hala dunku
+    gune ait olabilir -- guard TUM sembolleri duser, HER ISLEM GUNU rutin
+    olarak fail-open tetiklenir (bu BEKLENEN bir durumdur, ariza degildir).
+    Acilis toleransi penceresinde (< GUARD_OPEN_GRACE_SECONDS) fail-open
+    quote'lari YINE dondurulur (veri sürekliligi) ama bist_guard_fail_open_total
+    sayaci ARTMAZ -- aksi halde bu sayaca bagli bir alarm HER SABAH rutin
+    olarak ates alir, gercek bir takvim-hatasi sinyalinden ayirt edilemez
+    hale gelirdi (alarm yorgunlugu)."""
+    override_settings(guard_fail_open_min_symbols=20, guard_open_grace_seconds=1200.0)
+    five_min_after_open = datetime(2026, 7, 6, 7, 5, tzinfo=UTC)  # TR 10:05 (acilis 10:00)
+    symbols = [f"SYM{i}" for i in range(20)]
+    stale_only = FakeProvider(
+        "yahoo_chart",
+        {
+            s: Quote(symbol=s, price=1.0, exchange_time=_YESTERDAY_BAR, source="yahoo_chart")
+            for s in symbols
+        },
+    )
+    agg = _agg([stale_only])
+    before = metrics.GUARD_FAIL_OPEN._value.get()
+    res = await _run_cycle(agg, symbols, now=five_min_after_open)
+    assert len(res) == len(symbols)
+    assert all(q.stale for q in res.values())  # veri sürekliligi korunur (stale=true)
+    after = metrics.GUARD_FAIL_OPEN._value.get()
+    assert after == before  # sayac ARTMADI -- rutin acilis, alarm-degeri korunur
+
+
+async def test_fail_open_outside_opening_grace_fires_metric_and_log(override_settings):
+    """Karsit durum: acilis toleransi penceresi DISINDA (>= GUARD_OPEN_GRACE_
+    SECONDS) hala TUM sembol guard'la duserse bu artik GERCEK bir sorundur
+    (bkz. review) -- sayac eskisi gibi artar."""
+    override_settings(guard_fail_open_min_symbols=20, guard_open_grace_seconds=1200.0)
+    twenty_five_min_after_open = datetime(2026, 7, 6, 7, 25, tzinfo=UTC)  # TR 10:25
+    symbols = [f"SYM{i}" for i in range(20)]
+    stale_only = FakeProvider(
+        "yahoo_chart",
+        {
+            s: Quote(symbol=s, price=1.0, exchange_time=_YESTERDAY_BAR, source="yahoo_chart")
+            for s in symbols
+        },
+    )
+    agg = _agg([stale_only])
+    before = metrics.GUARD_FAIL_OPEN._value.get()
+    res = await _run_cycle(agg, symbols, now=twenty_five_min_after_open)
+    assert len(res) == len(symbols)
+    after = metrics.GUARD_FAIL_OPEN._value.get()
+    assert after == before + 1  # pencere disinda -- GERCEK sorun, sayac artar
+
+
 async def test_guard_drop_streak_ages_out(override_settings, fake_clock):
     """MEDIUM-2: streak'in yaslanmasi -- son artistan uzun sure (esik) sonra
     yeni bir tam-dusme gelirse eski streak GECERSIZ sayilir (sifirdan
@@ -1033,6 +1090,32 @@ async def test_cycle_wide_guard_drop_triggers_fail_open_even_with_small_remainde
     assert all(q.stale for q in res.values())
     for s in small_remainder_batch:
         assert res[s].stale is True
+
+
+async def test_end_cycle_aborted_skips_fail_open_entirely(override_settings):
+    """MEDIUM-1 (review-4): iptal/timeout veya erken durdurma ile YARIM kalan
+    bir tur "hicbir sembol taze degil" olcusunu yalniz kosulan az sayida
+    batch'e dayandirir -- TUM watchlist icin sistemik kanit SAYILMAZ.
+    `end_cycle(aborted=True)` fail-open'i (metrik/log/donus degeri) HIC
+    degerlendirmemeli, bos dict donmeli."""
+    override_settings(guard_fail_open_min_symbols=20)
+    symbols = [f"SYM{i}" for i in range(20)]
+    stale_only = FakeProvider(
+        "yahoo_chart",
+        {
+            s: Quote(symbol=s, price=1.0, exchange_time=_YESTERDAY_BAR, source="yahoo_chart")
+            for s in symbols
+        },
+    )
+    agg = _agg([stale_only])
+    agg.begin_cycle()
+    res = await agg.fetch_quotes(symbols, now=_OPEN_NOW, count_toward_cooldown=True)
+    assert res == {}  # guard hepsini dusurdu (normal batch donusu)
+    before = metrics.GUARD_FAIL_OPEN._value.get()
+    fail_open_result = agg.end_cycle(now=_OPEN_NOW, aborted=True)
+    assert fail_open_result == {}  # aborted=True -- fail-open HIC degerlendirilmedi
+    after = metrics.GUARD_FAIL_OPEN._value.get()
+    assert after == before  # sayac artmadi
 
 
 async def test_fail_open_still_applies_sanity_check(override_settings):

@@ -149,31 +149,60 @@ bunların yaşını `updated_at` (cache yazım anı) yerine **gerçek veri
 zamanından** (`exchange_time`/`bar_time`) hesaplar — fail-open sırasında
 saatler önceki bir bar saniyelere küçültülüp operatörü yanıltmaz.
 
-### 🔓 Sanity-check kaçış yolları (bedelsiz/split sonrası kalıcı kilit kırılması)
+> **Açılış toleransı (`GUARD_OPEN_GRACE_SECONDS`, vars. 1200 sn = 20 dk):**
+> veri ~15 dk gecikmeli olduğu için seans açılışının ilk ~15 dakikasında
+> kaynağın `regularMarketTime`'ı hâlâ dünkü güne ait olabilir — guard TÜM
+> sembolleri düşürür ve **HER İŞLEM GÜNÜ rutin olarak** fail-open tetiklenir
+> (bu **BEKLENEN** bir durumdur, arıza değildir). Açılış toleransı
+> penceresindeyken fail-open quote'ları **yine döndürülür** (veri
+> sürekliliği, `stale=true` ile) **ama `bist_guard_fail_open_total` sayacı
+> artırılmaz ve CRITICAL log basılmaz** — aksi hâlde bu sayaç/log her sabah
+> rutin olarak ateş alır, gerçek bir takvim-hatası sinyalinden (bilinmeyen
+> resmi tatil) ayırt edilemez hâle gelirdi (alarm yorgunluğu). Pencere
+> dışında (eskisi gibi) sayaç + CRITICAL log basılır. **`store.is_stale()`**
+> (dolayısıyla `/ready`) **aynı pencereyi paylaşır**: seans açılışının ilk
+> `GUARD_OPEN_GRACE_SECONDS`'i içinde `/ready` **200** döner (servis hazır,
+> veri henüz gecikmeli — beklenen); pencere dolduktan sonra hâlâ düşük
+> `fresh_ratio` varsa bu gerçek bir sorundur → **503**. (Bu iki tolerans
+> eskiden ayrı ayardaydı — `is_stale()` `STALENESS_SECONDS`, vars. 300 sn —
+> ve veri gecikmesinden [900 sn] kısa olduğu için **her işlem günü** açılıştan
+> ~5-16 dk sonrası `/ready` 503 + critical alarm üretiyordu; bu bir
+> **regresyondu**, artık düzeltildi.)
+
+### 🔓 Sanity-check kaçış yolu (bedelsiz/split sonrası kalıcı kilit kırılması)
 
 Sanity-check bir önceki fiyata göre absürt (`SANITY_MAX_CHANGE_PCT`, vars.
 %60) bir sıçramayı reddeder — ama bedelsiz sermaye artırımı/split sonrası
 **gerçek** bir fiyat da aynı derecede "absürt" görünür (örn. %200 bedelsiz
 sonrası 200 TL → 66 TL). Tek intraday kaynaklı dünyada (yukarıya bakın) bu
-kilidi kıracak **iki bağımsız kaçış yolu** vardır (üçüncüsü — çoklu-kaynak
-uzlaşısı — Faz-2 için korunur ama bugün hiç tetiklenemez, `candidates` her
-zaman <2 kalır):
+kilidi kıracak **tek yol** **ısrar teyididir** (`reason=persistence`,
+`SANITY_ESCAPE_PERSIST_ROUNDS` vars. 3): aynı kaynak aynı
+(±`SANITY_ESCAPE_PERSIST_TOLERANCE_PCT` vars. %1 içindeki) aykırı fiyatı **N
+ardışık TURDA** (`fetch_quotes()` çağrısı başına bir kez — aynı batch içinde
+birden fazla kaynak denense bile) tekrar ederse kabul edilir; geçici bir tick
+hatası ısrar etmez, kurumsal işlem (bedelsiz/split) eder. Escape
+penceresinden (`SANITY_REJECT_ESCAPE_SECONDS`) uzun bir fetch boşluğu
+(restart/kesinti) "ardışıklığı" bozar, sayaç sıfırlanır. Kabul
+`bist_sanity_escapes_total{provider,reason}` sayacını artırır ve bir CRITICAL
+log basar. Çoklu-kaynak uzlaşısı (`reason=corroboration`) Faz-2 için korunur
+ama bugün hiç tetiklenemez (`candidates` her zaman `<2` kalır).
 
-1. **İç tutarlılık (`reason=consistency`):** kaynağın kendi `previous_close`
-   alanı yeni `price` ile tutarlıysa (kaynak "bu düşüş gerçek, önceki
-   kapanışımı da düzelttim" diyor) VE bu restated `previous_close` bizim
-   bildiğimiz önceki fiyattan da önemli ölçüde farklıysa (gerçek bir baz
-   değişikliği sinyali) **tek turda, tek kaynaktan, anında** kabul edilir.
-2. **Israr teyidi (`reason=persistence`, `SANITY_ESCAPE_PERSIST_ROUNDS` vars.
-   3):** aynı kaynak aynı (±`SANITY_ESCAPE_PERSIST_TOLERANCE_PCT` vars. %1
-   içindeki) aykırı fiyatı **N ardışık TURDA** (`fetch_quotes()` çağrısı
-   başına bir kez — aynı batch içinde birden fazla kaynak denense bile) tekrar
-   ederse kabul edilir; geçici bir tick hatası ısrar etmez, kurumsal işlem
-   (bedelsiz/split) eder. Escape penceresinden (`SANITY_REJECT_ESCAPE_SECONDS`)
-   uzun bir fetch boşluğu (restart/kesinti) "ardışıklığı" bozar, sayaç sıfırlanır.
+**Neden yalnız ısrar teyidi kaldı (güvenlik):** eski tasarımda ayrıca bir
+"iç tutarlılık" yolu vardı — kaynağın kendi `previous_close`'u yeni fiyatla
+tutarlıysa (VE bizim bildiğimizden önemli ölçüde farklıysa) **tek turda,
+teyitsiz** kabul ediyordu. Bu yol **kaldırıldı**: kanıtlanmış bir açık,
+guard'ın var oluş sebebi olan hata sınıfının (yanlış-birim/yanlış-enstrüman)
+tam kendisinin escape'i açtığını gösterdi — örn. kaynak THYAO için yanlışlıkla
+bir USD satırı dönerse (`price=2.50, previous_close=2.40`) bu iki alan
+BİRLİKTE kaydığı için hem kendi içinde tutarlı GÖRÜNÜR hem bizim TRY
+fiyatımızdan (100) "önemli ölçüde farklı" GÖRÜNÜR — tek bir bozuk turda (60
+sn) client-side stop-loss'u besleyen feed'e sessizce sızabilirdi. Israr
+teyidi (3 ardışık tur, ~3 dk) çok daha yüksek bir bar'dır: gerçek bir
+kurumsal işlem (bedelsiz/split) gün öncesinden bilinir, 3 dakikalık gecikme
+maddi değildir; geçici/rastgele bir hatalı payload ise 3 dk boyunca aynı
+değeri tekrarlamaz.
 
-Her iki yolda da kabul `bist_sanity_escapes_total{provider,reason}` sayacını
-artırır ve bir CRITICAL log basar. **Neden gerekli:** eski tasarım kaçışı
+**Neden ısrar teyidi gerekli (tarihçe):** eski tasarım escape'i
 `len(candidates) >= 2` (en az iki bağımsız kaynağın uzlaşması) şartına
 bağlıyordu — ama seans içinde fiilen tek kaynak (`yahoo_chart`) kaldığı için
 bu şart YAPISAL OLARAK asla sağlanamaz, escape ölü kalır ve bedelsiz/split

@@ -153,7 +153,24 @@ class Store(ABC):
     async def is_stale(self) -> bool:
         """Veri bayat mi? Taze sembol KAPSAMASINA bakar (en-eski-sembol degil):
         tek guncellenemeyen sembol (askidaki hisse, watchlist-disi tek sorgu)
-        tum servisi kalici bayat gosteremez."""
+        tum servisi kalici bayat gosteremez.
+
+        HIGH-1 (review-4, REGRESYON): acilis toleransi eskiden `staleness_
+        seconds` (vars. 300 sn) idi -- ama veri ~15 dk (900 sn) gecikmeli
+        oldugu icin acilisin ilk ~15 dk'sinda kaynagin regularMarketTime'i
+        hala dunku/Cuma gunune ait olabilir; guard TUM sembolleri duser,
+        TUR-duzeyi fail-open devreye girer (bkz. aggregator.end_cycle),
+        `fresh_ratio()=0` olur -- ama bu servis 300 sn sonra zaten "bayat"
+        sayip HER ISLEM GUNU acilista ~10-16 dk `/ready` 503 + critical alarm
+        uretiyordu (rutin, arizasiz bir durum icin). Guard'in KENDI acilis
+        toleransi (`GUARD_OPEN_GRACE_SECONDS`, vars. 1200 sn) zaten "acilistan
+        sonraki bu kadar sure icinde tam guard-dususu NORMALDIR" karari
+        vermisti -- ama bu karar yalniz provider-streak'e uygulaniyordu,
+        buradaki (ayri) 300 sn'lik tolerans ona HIC bakmiyordu. Artik ayni
+        pencereyi paylasir: acilisin ilk GUARD_OPEN_GRACE_SECONDS'i icinde
+        (dolayisiyla fail-open'in fiilen calistigi tum sure boyunca) is_stale
+        False doner -- servis hazir, veri henuz gecikmeli (BEKLENEN). Pencere
+        disinda hala dusuk fresh_ratio varsa bu GERCEK bir sorundur -> 503."""
         from .market import seconds_since_open
 
         ratio = await self.fresh_ratio()
@@ -163,7 +180,7 @@ class Store(ABC):
         since_open = seconds_since_open()
         if since_open is None:
             return False
-        if since_open <= settings.staleness_seconds:
+        if since_open <= settings.guard_open_grace_seconds:
             return False
 
         return ratio < settings.staleness_min_fresh_pct / 100.0
