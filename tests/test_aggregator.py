@@ -69,10 +69,15 @@ def _agg(providers):
     agg = _TestAggregator.__new__(_TestAggregator)
     agg._providers = [(p, CircuitBreaker(p.name)) for p in providers]
     agg._sanity_reject_since = {}
+    agg._sanity_persist = {}
     agg._guard_drop_streak = {}
     agg._guard_drop_streak_updated_at = {}
     agg._guard_cooldown_until = {}
     agg._cycle_fully_dropped = None
+    agg._cooldown_probed_this_cycle = None
+    agg._cycle_fresh_symbols = None
+    agg._cycle_guard_dropped_candidates = None
+    agg._cycle_previous = None
     return agg
 
 
@@ -171,16 +176,60 @@ async def test_sanity_escape_two_agreeing_sources(override_settings, fake_clock)
     assert res["THYAO"].price == 25.0
 
 
-async def test_sanity_escape_needs_corroboration(override_settings, fake_clock):
-    # Tek kaynak ne kadar israr ederse etsin teyitsiz kabul edilmemeli
-    # (tek bozuk kaynagin fiyati commit edilip previous'i zehirlemesin).
-    override_settings(sanity_reject_escape_seconds=900.0)
-    agg = _agg([FakeProvider("yahoo", {"THYAO": Quote(symbol="THYAO", price=25.0)})])
+async def test_single_source_escape_rejects_without_persistence(override_settings, fake_clock):
+    """CRITICAL-1: tek kaynakli dunyada (coklu-kaynak corroboration YAPISAL
+    OLARAK imkansiz -- bkz. config.py PROVIDERS yorumu) salt zaman gecmesi
+    YETMEZ. Her turda FARKLI bir aykiri fiyat gelirse (gecici tick hatasi
+    paterni, ISRAR YOK) escape HICBIR ZAMAN tetiklenmemeli -- tek bozuk
+    kaynagin rastgele fiyati commit edilip `previous`'i zehirlemesin."""
+    override_settings(sanity_reject_escape_seconds=900.0, sanity_escape_persist_rounds=3)
+    quotes = {"THYAO": Quote(symbol="THYAO", price=25.0)}
+    agg = _agg([FakeProvider("yahoo", quotes)])
     await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
     fake_clock.now += 500
+    quotes["THYAO"] = Quote(symbol="THYAO", price=40.0)  # farkli aykiri fiyat -- israr YOK
     await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
-    fake_clock.now += 500
+    fake_clock.now += 500  # kumulatif 1000 >= 900 (zaman penceresi dolardi)
+    quotes["THYAO"] = Quote(symbol="THYAO", price=25.0)
     res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
+    assert "THYAO" not in res  # zaman penceresi dolsa da: TEK kaynak + ISRAR YOK
+
+
+async def test_single_source_escape_via_persistence(override_settings, fake_clock):
+    """CRITICAL-1(b): TEK kaynak ayni (tolerans icindeki) aykiri fiyati
+    SANITY_ESCAPE_PERSIST_ROUNDS ardisik TURDA tekrarlarsa kabul edilir --
+    coklu-kaynak sartina (candidates>=2) BAGIMLI DEGIL. Bedelsiz/split
+    sonrasi TEK intraday kaynakli (yahoo_chart-only) production zincirinde
+    escape'in TEK canli yoludur -- eskiden (candidates>=2 sarti) bu senaryoda
+    escape YAPISAL OLARAK asla tetiklenemez, sembol KALICI olarak kilitlenirdi."""
+    override_settings(sanity_reject_escape_seconds=900.0, sanity_escape_persist_rounds=3)
+    before = metrics.SANITY_ESCAPES.labels(
+        provider="yahoo_chart", reason="persistence"
+    )._value.get()
+    quotes = {"THYAO": Quote(symbol="THYAO", price=25.0, source="yahoo_chart")}
+    agg = _agg([FakeProvider("yahoo_chart", quotes)])
+    assert "THYAO" not in await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})  # 1. tur
+    fake_clock.now += 60
+    assert "THYAO" not in await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})  # 2. tur
+    fake_clock.now += 60  # zaman penceresi (900sn) HENUZ dolmadi -- persist sayaci 3. tur
+    res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
+    assert res["THYAO"].price == 25.0
+    after = metrics.SANITY_ESCAPES.labels(provider="yahoo_chart", reason="persistence")._value.get()
+    assert after == before + 1
+
+
+async def test_single_source_escape_persistence_gap_resets_streak(override_settings, fake_clock):
+    """CRITICAL-1(b): ardisiklik sarti -- ayni (aykiri) fiyat N turda
+    tekrarlansa bile araya escape penceresinden (900sn) UZUN bir bosluk
+    (restart/kesinti) girerse sayac sifirlanir; ardisiklik yeniden bastan
+    saymalidir (kesintisiz red penceresiyle -- _sanity_reject_since -- ayni
+    felsefe)."""
+    override_settings(sanity_reject_escape_seconds=900.0, sanity_escape_persist_rounds=3)
+    quotes = {"THYAO": Quote(symbol="THYAO", price=25.0, source="yahoo_chart")}
+    agg = _agg([FakeProvider("yahoo_chart", quotes)])
+    await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})  # persist=1
+    fake_clock.now += 2000  # escape penceresinden UZUN bosluk -- ardisiklik BOZULUR
+    res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})  # persist sifirdan 1
     assert "THYAO" not in res
 
 
@@ -199,13 +248,17 @@ async def test_sanity_escape_gap_resets_window(override_settings, fake_clock):
 
 
 async def test_sanity_escape_disabled_writes_no_state(override_settings, fake_clock):
-    override_settings(sanity_reject_escape_seconds=0.0)
+    # Iki BAGIMSIZ escape anahtari var (corroboration icin SANITY_REJECT_
+    # ESCAPE_SECONDS, israr teyidi icin SANITY_ESCAPE_PERSIST_ROUNDS) --
+    # "escape tamamen kapali" testi ikisini de sifirlamali.
+    override_settings(sanity_reject_escape_seconds=0.0, sanity_escape_persist_rounds=0)
     agg = _agg(_two_agreeing_providers())
     await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
     fake_clock.now += 5000
     res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
     assert "THYAO" not in res
     assert agg._sanity_reject_since == {}  # kapaliyken damga birakilmamali
+    assert agg._sanity_persist == {}
 
 
 async def test_sanity_timer_cleared_when_prev_gone(override_settings, fake_clock):
@@ -232,6 +285,36 @@ async def test_sanity_escape_timer_resets_on_accept(override_settings, fake_cloc
     quotes["THYAO"] = Quote(symbol="THYAO", price=25.0)
     res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
     assert "THYAO" not in res  # yeni pencere; hemen kacis olmamali
+
+
+async def test_single_source_escape_via_previous_close_consistency(override_settings):
+    """CRITICAL-1(a): kaynak KENDI previous_close'unu da yeni fiyatla TUTARLI
+    sekilde duzeltirse (bedelsiz/split imzasi) TEK turda, TEK kaynaktan,
+    ISRAR/zaman penceresi beklemeden ANINDA kabul edilir. THYAO 200 TL iken
+    %300 bedelsiz sonrasi kaynak 50 TL + previous_close=48 (kendi restated
+    onceki kapanisi) donduruyor -- 200->50 sicramasi BIZIM previous'umuza
+    (200) gore absurt (%75) ama kaynagin KENDI previous_close'una (48) gore
+    normal (%4.2)."""
+    before = metrics.SANITY_ESCAPES.labels(
+        provider="yahoo_chart", reason="consistency"
+    )._value.get()
+    quote = Quote(symbol="THYAO", price=50.0, previous_close=48.0, source="yahoo_chart")
+    agg = _agg([FakeProvider("yahoo_chart", {"THYAO": quote})])
+    res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 200.0})
+    assert res["THYAO"].price == 50.0
+    after = metrics.SANITY_ESCAPES.labels(provider="yahoo_chart", reason="consistency")._value.get()
+    assert after == before + 1
+
+
+async def test_previous_close_consistency_rejects_unchanged_baseline(override_settings):
+    """CRITICAL-1(a) guvenlik: previous_close BIZIM bildigimiz onceki fiyattan
+    (100) onemli olcude farkli DEGILSE (yani kaynak bir "baz degisikligi"
+    bildirmiyor) escape TETIKLENMEMELI -- yalniz price~previous_close
+    tutarliligina bakmak HER NORMAL quote'ta da trivially dogru olurdu."""
+    quote = Quote(symbol="THYAO", price=999.0, previous_close=100.5, source="yahoo_chart")
+    agg = _agg([FakeProvider("yahoo_chart", {"THYAO": quote})])
+    res = await agg.fetch_quotes(["THYAO"], previous={"THYAO": 100.0})
+    assert "THYAO" not in res
 
 
 async def test_history_falls_back_to_source_with_bars():
@@ -546,18 +629,21 @@ async def test_tradingview_fresh_bar_survives_default_chain_during_session():
     assert isyatirim.calls == 0  # TV'nin taze quote'u kabul edildi -- isyatirim'e hic dusulmedi
 
 
-async def _run_cycle(agg, symbols, *, now=None, batches=None):
+async def _run_cycle(agg, symbols, *, now=None, batches=None, previous=None):
     """Test yardimcisi: begin_cycle/fetch_quotes(count_toward_cooldown=True)/
     end_cycle sirasini tek bir 'tur' olarak simule eder -- gercek updater
     kullanimini (bkz. updater.py) birebir yansitir. `batches` verilirse
     `symbols` yerine her biri ayri bir fetch_quotes cagrisi (batch) olarak
-    kullanilir (HIGH-1: bir turda birden fazla batch)."""
+    kullanilir (HIGH-1: bir turda birden fazla batch). HIGH-3: end_cycle()
+    artik (TUR-bazli fail-open kararinin sonucu olan) bir dict DONDURUR --
+    updater.py'deki gercek kablolamayi (fail_open_quotes ayrica commit edilir)
+    yansitmak icin buraya da MERGE edilir."""
     agg.begin_cycle()
     results = {}
     for batch in batches or [symbols]:
-        res = await agg.fetch_quotes(batch, now=now, count_toward_cooldown=True)
+        res = await agg.fetch_quotes(batch, previous=previous, now=now, count_toward_cooldown=True)
         results.update(res)
-    agg.end_cycle(now=now)
+    results.update(agg.end_cycle(now=now))
     return results
 
 
@@ -859,12 +945,13 @@ async def test_small_batch_guard_drop_does_not_fail_open(override_settings):
     assert metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get() == 0
 
 
-async def test_fail_open_does_not_skip_unrelated_sanity_escape(override_settings, fake_clock):
+async def test_escape_unaffected_by_guard_drop_in_same_batch(override_settings, fake_clock):
     """LOW-1: fail-open'in eskiden erken `return result`'i AYNI batch'teki
     ILGISIZ (guard'la degil SANITY ile reddedilen) sembollerin kacis (escape)
-    firsatini sessizce atliyordu (o an erisilemez bir kod yoluydu -- fail-open
-    esigi gevseyince CANLI bir bug olurdu, bkz. HIGH-1 review-2). Artik
-    fail-open TETIKLENSE bile escape blogu normal calisir."""
+    firsatini sessizce atliyordu. HIGH-3'ten sonra fail-open artik batch
+    donusune HIC DOKUNMUYOR (karari yalniz end_cycle()'da verilir) -- bu
+    yuzden escape blogu, ayni batch'te guard'la dusen baska semboller olsa
+    bile HER ZAMAN normal calisir (yapisal olarak artik BLOKLANAMAZ)."""
     override_settings(
         guard_cooldown_fail_threshold=1,
         guard_fail_open_min_symbols=20,
@@ -887,21 +974,92 @@ async def test_fail_open_does_not_skip_unrelated_sanity_escape(override_settings
     symbols = [*stale_symbols, "ODDBALL"]
     previous = {"ODDBALL": 100.0}
 
+    # HIGH-3: bu senaryoyu (TEK batch = TEK cycle) gercek updater'in olagan
+    # kullanimini yansitmak icin begin_cycle/end_cycle ile sarmalar.
+    agg.begin_cycle()
     # Kesintisiz red penceresi: ardisik +=500 artislarla (HER ARA 900sn escape
     # esiginin ALTINDA kalmali -- aksi halde "gece/kesinti bosluğu" sayilip
     # pencere sifirlanir, bkz. _is_sane); kumulatif 1000 >= 900'de escape acilir.
-    res1 = await agg.fetch_quotes(symbols, previous=previous, now=_OPEN_NOW)
+    res1 = await agg.fetch_quotes(
+        symbols, previous=previous, now=_OPEN_NOW, count_toward_cooldown=True
+    )
     assert "ODDBALL" not in res1
     fake_clock.now += 500
-    res_mid = await agg.fetch_quotes(symbols, previous=previous, now=_OPEN_NOW)
+    res_mid = await agg.fetch_quotes(
+        symbols, previous=previous, now=_OPEN_NOW, count_toward_cooldown=True
+    )
     assert "ODDBALL" not in res_mid
     fake_clock.now += 500  # kumulatif 1000 >= 900, red kesintisiz surdu
 
-    # Son cagri: HEM fail-open (20 SYM) HEM sanity-escape (ODDBALL) AYNI batch'te.
-    res2 = await agg.fetch_quotes(symbols, previous=previous, now=_OPEN_NOW)
-    assert len(res2) == len(symbols)  # fail-open'in erken donusu ODDBALL'i ATLAMADI
-    assert all(res2[s].stale for s in stale_symbols)  # fail-open ile geri alindi
-    assert res2["ODDBALL"].price == 25.0  # escape ile (iki kaynak uzlasarak) kabul edildi
+    res2 = await agg.fetch_quotes(
+        symbols, previous=previous, now=_OPEN_NOW, count_toward_cooldown=True
+    )
+    assert res2.get("ODDBALL") is not None and res2["ODDBALL"].price == 25.0  # escape calisti
+    assert all(s not in res2 for s in stale_symbols)  # guard'la dustu, batch donusu hala bos
+
+    # TUR sonu: bu cycle'da ODDBALL fresh oldugu icin ("TUM watchlist sifir
+    # taze quote uretti mi" sorusunun cevabi HAYIR) fail-open TETIKLENMEZ --
+    # 20 guard-dusmus sembol bu TUR icin normal (fail-open'siz) "veri yok"
+    # olarak kalir; bu, TEK bir sembolun escape'i digerlerini "sistemik degil"
+    # gostermesi acisindan dogru/beklenen bir etkilesimdir (bkz.
+    # test_cycle_wide_guard_drop_triggers_fail_open_even_with_small_remainder_batch
+    # icin TAMAMEN karanlik bir cycle senaryosu).
+    fail_open_result = agg.end_cycle(now=_OPEN_NOW)
+    assert fail_open_result == {}
+
+
+async def test_cycle_wide_guard_drop_triggers_fail_open_even_with_small_remainder_batch(
+    override_settings,
+):
+    """HIGH-3(i): eski (batch-bazli) tasarimda watchlist/BATCH_SIZE
+    boluminden kalan KUCUK son batch (orn. 525/40 = kalan 5) esigi (20) hicbir
+    zaman asamayacagi icin sistemik bir kesinti sirasinda bile fail-open'dan
+    YARARLANAMAZDI (korunma `len(watchlist) % BATCH_SIZE`'a bagliydi).
+    Cycle-bazli tasarimda esik CYCLE'in TOPLAM guard-dusen aday sayisina
+    uygulanir -- kucuk son batch de dahil TUM sembolleri kurtarir."""
+    override_settings(guard_fail_open_min_symbols=20, guard_cooldown_fail_threshold=1)
+    big_batch = [f"SYM{i}" for i in range(17)]
+    small_remainder_batch = ["A", "B", "C"]  # tek basina esigin (20) COK altinda
+    quotes = {
+        s: Quote(symbol=s, price=1.0, exchange_time=_YESTERDAY_BAR, source="yahoo_chart")
+        for s in (*big_batch, *small_remainder_batch)
+    }
+    stale_only = FakeProvider("yahoo_chart", quotes)
+    agg = _agg([stale_only])
+    res = await _run_cycle(agg, None, now=_OPEN_NOW, batches=[big_batch, small_remainder_batch])
+    # Cycle TOPLAMI (17+3=20) esigi karsiladigi icin remainder batch'teki
+    # semboller de (tek basina hicbir zaman esigi asamayacakken) kurtarildi.
+    assert len(res) == len(big_batch) + len(small_remainder_batch)
+    assert all(q.stale for q in res.values())
+    for s in small_remainder_batch:
+        assert res[s].stale is True
+
+
+async def test_fail_open_still_applies_sanity_check(override_settings):
+    """MEDIUM-1: fail-open'in KENDISI sanity-check'i ATLAMAMALI -- aksi halde
+    absurt bir fiyat + bayat damga TOGETHER commit edilip `previous`'i kalici
+    olarak zehirleyebilir (CRITICAL-1 ile birlesince zehir KALICI olurdu).
+    Fail-open adaylarindan biri BIZIM bildigimiz previous'a gore absurt
+    (>%60 degisim) ise o sembol fail-open'dan da GECMEMELI; digerleri normal
+    kurtarilir."""
+    override_settings(guard_fail_open_min_symbols=20, guard_cooldown_fail_threshold=1)
+    symbols = [f"SYM{i}" for i in range(19)] + ["POISON"]
+    quotes = {
+        s: Quote(symbol=s, price=100.0, exchange_time=_YESTERDAY_BAR, source="yahoo_chart")
+        for s in symbols[:-1]
+    }
+    # POISON: guard'in dusurdugu (bayat bar) aday absurt bir fiyat tasiyor --
+    # previous'a gore (%900) kesinlikle absurt, gercek bir fiyat degil.
+    quotes["POISON"] = Quote(
+        symbol="POISON", price=999.0, exchange_time=_YESTERDAY_BAR, source="yahoo_chart"
+    )
+    stale_only = FakeProvider("yahoo_chart", quotes)
+    agg = _agg([stale_only])
+    previous = {"POISON": 100.0}
+    res = await _run_cycle(agg, symbols, now=_OPEN_NOW, previous=previous)
+    assert "POISON" not in res  # sanity reddetti -- fail-open bunu KURTARAMADI
+    assert len(res) == len(symbols) - 1  # digerleri normal fail-open ile kurtarildi
+    assert all(res[s].stale for s in symbols if s != "POISON")
 
 
 async def test_fail_open_in_one_batch_vetoes_whole_cycle_streak(override_settings):
@@ -967,12 +1125,40 @@ async def test_production_default_chain_fail_open_with_real_isyatirim_provider(
     monkeypatch.setattr(yahoo_chart_provider, "fetch_quotes", fake_yahoo_fetch)
     monkeypatch.setattr(isyatirim_provider, "fetch_quotes", fail_if_called)
 
-    res = await agg.fetch_quotes(symbols, now=_OPEN_NOW, count_toward_cooldown=True)
+    # HIGH-3: fail-open karari artik end_cycle()'da verilir -- gercek
+    # updater'in begin_cycle/fetch_quotes(count_toward_cooldown=True)/
+    # end_cycle sirasini yansitir (bkz. _run_cycle).
+    res = await _run_cycle(agg, symbols, now=_OPEN_NOW)
     assert len(res) == len(symbols)
     assert all(q.stale for q in res.values())
     # Sistemik sinyal -- gercek isyatirim de dahil hicbir kaynak cooldown'a girmez.
     assert metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="yahoo_chart")._value.get() == 0
     assert metrics.PROVIDER_GUARD_COOLDOWN.labels(provider="isyatirim")._value.get() == 0
+
+
+async def test_on_demand_call_never_triggers_fail_open(override_settings):
+    """HIGH-3(ii): fail-open karari yalniz begin_cycle/end_cycle SARMALAYAN
+    (updater'in yapilandirilmis TUR dongusu) cagrilar icin degerlendirilir.
+    On-demand `/quotes?symbols=` gibi cagrilar begin_cycle() HIC CAGIRMAZ --
+    esik (20) asilacak kadar cok cache-miss sembol istense bile fail-open
+    ASLA tetiklenmemeli (eskiden batch-bazli karar count_toward_cooldown'a
+    bakmadigi icin bunu tetikleyebiliyordu, bkz. review)."""
+    override_settings(guard_fail_open_min_symbols=20)
+    symbols = [f"SYM{i}" for i in range(30)]
+    stale_only = FakeProvider(
+        "yahoo_chart",
+        {
+            s: Quote(symbol=s, price=1.0, exchange_time=_YESTERDAY_BAR, source="yahoo_chart")
+            for s in symbols
+        },
+    )
+    agg = _agg([stale_only])
+    before = metrics.GUARD_FAIL_OPEN._value.get()
+    # begin_cycle() HIC cagrilmadi -- tipik on-demand kullanim.
+    res = await agg.fetch_quotes(symbols, now=_OPEN_NOW)
+    assert res == {}
+    after = metrics.GUARD_FAIL_OPEN._value.get()
+    assert after == before
 
 
 async def test_history_skips_non_history_provider_and_keeps_quotes():

@@ -42,6 +42,15 @@ class Aggregator:
         # Sembol -> (ilk red, son red) monotonic. Kesintisiz red penceresini izler;
         # herhangi bir kabulde temizlenir, escape'ten uzun bosluk pencereyi sifirlar.
         self._sanity_reject_since: dict[str, tuple[float, float]] = {}
+        # CRITICAL-1(b): sembol -> (ilk aykiri fiyat/tolerans-ankraji, ardisik
+        # ISRAR sayaci, kaynak adi, son guncelleme ani/monotonic). Ayni kaynak
+        # ayni fiyati N ardisik TURDA (fetch_quotes CAGRISI -- provider basina
+        # degil, bkz. _update_persist_and_check) tekrarlarsa kabul edilir --
+        # coklu-kaynak sartina (candidates>=2) BAGIMLI DEGILDIR, tek intraday
+        # kaynakli dunyada (bkz. config.py PROVIDERS yorumu) escape'in TEK
+        # canli yolu budur. Escape penceresinden (SANITY_REJECT_ESCAPE_SECONDS)
+        # uzun bir bosluk (restart/kesinti) "ardisiklik"i bozar, sayac sifirlanir.
+        self._sanity_persist: dict[str, tuple[float, int, str, float]] = {}
         # MEDIUM-7: provider adi -> ardisik TAM guard-dusme (TUR bazinda,
         # bkz. begin_cycle/end_cycle -- HIGH-1) sayisi / son artis ani
         # (monotonic, MEDIUM-2 yaslanma icin) / cooldown bitis ani.
@@ -59,11 +68,18 @@ class Aggregator:
         # "prob" (half-open) denemesi -- circuit-breaker half-open deseniyle
         # ayni ruh. None = aktif tur yok.
         self._cooldown_probed_this_cycle: set[str] | None = None
-        # LOW-2: bu TUR icinde HERHANGI bir batch fail-open'a girdiyse tum
-        # turun guard-drop degerlendirmesi VETO edilir (bkz. end_cycle) --
-        # fail-open sistemik bir isarettir, ayni turdaki BASKA batch'lerin
-        # "tam dustu" bilgisi de suphelidir.
-        self._cycle_fail_open_occurred: bool = False
+        # HIGH-3 (review-3): fail-open artik BATCH degil TUR (cycle) bazinda
+        # karar verilir (bkz. end_cycle). Bu turda HICBIR batch'te fresh
+        # (guard'la dusmemis/kabul edilmis) quote alan sembol -- fail-open
+        # yalniz bu KUME BOSSA degerlendirilir ("TUM watchlist sifir taze
+        # quote uretti mi?"). guard_dropped_candidates ise TUM batch'lerden
+        # (henuz fresh olmamis semboller icin) biriken son guard-dusmus
+        # aday quote'lardir; end_cycle bunlari (MEDIUM-1: sanity'den GECIRIP)
+        # stale=true ile geri dondurur. _cycle_previous, end_cycle'daki
+        # sanity kontrolu icin biriken en guncel `previous` anlamli fiyatlardir.
+        self._cycle_fresh_symbols: set[str] | None = None
+        self._cycle_guard_dropped_candidates: dict[str, Quote] | None = None
+        self._cycle_previous: dict[str, float] | None = None
         for name in settings.providers:
             factory = _FACTORY.get(name)
             if factory is None:
@@ -91,10 +107,12 @@ class Aggregator:
         prev = (previous or {}).get(symbol)
         if prev is None or prev == 0 or quote.price is None:
             self._sanity_reject_since.pop(symbol, None)
+            self._sanity_persist.pop(symbol, None)
             return True
         change_pct = abs((quote.price - prev) / prev * 100.0)
         if change_pct <= settings.sanity_max_change_percent:
             self._sanity_reject_since.pop(symbol, None)
+            self._sanity_persist.pop(symbol, None)
             return True
 
         escape = settings.sanity_reject_escape_seconds
@@ -118,25 +136,115 @@ class Aggregator:
         )
         return False
 
-    def _try_escape(self, symbol: str, candidates: list[Quote]) -> Quote | None:
-        """Kesintisiz red penceresi dolduysa VE en az iki kaynak yeni fiyatta
-        uzlasiyorsa ilk adayi kabul eder.
-
-        Coklu-kaynak uzlasisi sarti: bedelsiz/split'te tum kaynaklar ayni yeni
-        fiyati verir; tek bozuk kaynagin fiyati ise teyit alamaz (previous'i
-        zehirleyip dogru fiyatlari reddettirme dongusunu engeller). Damga burada
-        SILINMEZ: kabul commit'e donusurse bir sonraki turda dogal kabul temizler,
-        donusmezse (orn. cross-validate dusurdu) pencere sifirlanmadan kalir.
+    def _internally_consistent(self, quote: Quote, previous: dict[str, float] | None) -> bool:
+        """CRITICAL-1(a): kaynagin KENDI `previous_close`'u yeni `price` ile
+        tutarliysa VE bu restated previous_close BIZIM bildigimiz onceki
+        fiyattan da onemli olcude farkliysa kabul edilir -- kaynak "baz fiyat
+        degisti (bedelsiz/split), ben previous_close'umu da duzelttim" diyor
+        demektir. Ikinci sart ZORUNLU: yalniz price~previous_close tutarliligi
+        (ilk sart) HER NORMAL quote'ta da trivially dogru olur -- ayirt edici
+        olan kaynagin BAZININ da (previous_close) degismis olmasidir. Tek
+        kaynak dunyasinda coklu-kaynak sartina (candidates>=2) BAGIMLI DEGILDIR.
         """
+        prev_close = quote.previous_close
+        our_prev = (previous or {}).get(quote.symbol)
+        if (
+            prev_close is None
+            or prev_close == 0
+            or quote.price is None
+            or our_prev is None
+            or our_prev == 0
+        ):
+            return False
+        own_change_pct = abs((quote.price - prev_close) / prev_close * 100.0)
+        if own_change_pct > settings.sanity_max_change_percent:
+            return False
+        baseline_shift_pct = abs((prev_close - our_prev) / our_prev * 100.0)
+        return baseline_shift_pct > settings.sanity_max_change_percent
+
+    def _update_persist_and_check(self, symbol: str, quote: Quote) -> bool:
+        """CRITICAL-1(b): ayni kaynak SANITY_ESCAPE_PERSIST_ROUNDS ardisik
+        TURDA (her `fetch_quotes()` cagrisinda -- provider basina degil,
+        BURADAN tam olarak BIR KEZ cagrilir, bkz. `_try_escape`) AYNI
+        (tolerans icindeki) aykiri fiyati tekrarladi mi? Gecici tick hatasi
+        israr etmez; kurumsal islem (bedelsiz/split) eder. Escape
+        penceresinden (`SANITY_REJECT_ESCAPE_SECONDS`) uzun bir fetch
+        bosluğu (restart/kesinti) "ardisiklik"i bozar -- `_sanity_reject_since`
+        ile ayni "kesintisiz" felsefesi (bkz. _is_sane)."""
+        rounds = settings.sanity_escape_persist_rounds
+        if rounds <= 0:
+            self._sanity_persist.pop(symbol, None)
+            return False
+        if quote.price is None:
+            return False
+        now = time.monotonic()
+        tol = settings.sanity_escape_persist_tolerance_pct
+        gap_limit = settings.sanity_reject_escape_seconds
+        entry = self._sanity_persist.get(symbol)
+        same_run = (
+            entry is not None
+            and entry[2] == quote.source
+            and entry[0] != 0
+            and abs(quote.price - entry[0]) / abs(entry[0]) * 100.0 <= tol
+            and (gap_limit <= 0 or now - entry[3] <= gap_limit)
+        )
+        count = entry[1] + 1 if same_run and entry is not None else 1
+        self._sanity_persist[symbol] = (quote.price, count, quote.source, now)
+        return count >= rounds
+
+    def _accept_escape(self, symbol: str, quote: Quote, reason: str) -> None:
+        metrics.SANITY_ESCAPES.labels(provider=quote.source, reason=reason).inc()
+        logger.critical(
+            "Sanity kacisi %s: '%s' ile kabul edildi (kaynak=%s, fiyat=%.4f)",
+            symbol,
+            reason,
+            quote.source,
+            quote.price,
+        )
+        self._sanity_reject_since.pop(symbol, None)
+        self._sanity_persist.pop(symbol, None)
+
+    def _try_escape(
+        self, symbol: str, candidates: list[Quote], previous: dict[str, float] | None
+    ) -> Quote | None:
+        """Kesintisiz sanity reddi altindaki bir sembolun kabul edilme yollari.
+
+        (a) Ic tutarlilik (CRITICAL-1a): bkz. `_internally_consistent`.
+        (b) Israr teyidi (CRITICAL-1b): bkz. `_update_persist_and_check`.
+        (c) Coklu-kaynak uzlasisi (Faz-2, birden fazla BAGIMSIZ kaynak varsa):
+            kesintisiz red penceresi (SANITY_REJECT_ESCAPE_SECONDS) dolduysa
+            VE en az iki kaynak yeni fiyatta uzlasiyorsa ilk adayi kabul eder.
+            Tek kaynakli dunyada `candidates` hep <2 kalir, bu yol hicbir
+            zaman tetiklenmez -- (a)/(b) bu dunyanin TEK canli escape yoludur.
+
+        Bu fonksiyon sembol basina fetch_quotes() CAGRISI basina TAM OLARAK
+        BIR KEZ cagrilir (rejected sozlugunde bir kez) -- (b)'nin ardisik-TUR
+        sayaci bu yuzden PROVIDER-bazli degil CAGRI-bazli ilerler (bir batch
+        icinde ayni sembol icin birden fazla kaynak denenmis olsa bile).
+
+        Damga (`_sanity_reject_since`/`_sanity_persist`) kabul commit'e
+        donusmezse (orn. cross-validate dusurdu) sifirlanmadan kalir.
+        """
+        if not candidates:
+            return None
+        base = candidates[0]
+        if base.price is None:
+            return None
+
+        if self._internally_consistent(base, previous):
+            self._accept_escape(symbol, base, "consistency")
+            return base
+
+        if self._update_persist_and_check(symbol, base):
+            self._accept_escape(symbol, base, "persistence")
+            return base
+
         escape = settings.sanity_reject_escape_seconds
         if escape <= 0 or len(candidates) < 2:
             return None
         entry = self._sanity_reject_since.get(symbol)
         now = time.monotonic()
         if entry is None or now - entry[0] < escape:
-            return None
-        base = candidates[0]
-        if base.price is None:
             return None
         max_pct = settings.cross_validate_max_pct
         agree = sum(
@@ -147,7 +255,6 @@ class Aggregator:
         )
         if agree < 1:
             return None
-        metrics.SANITY_ESCAPES.inc()
         logger.warning(
             "Sanity kacisi %s: %d kaynak yeni fiyatta uzlasti, %.0f sn kesintisiz "
             "red sonrasi kabul ediliyor (fiyat=%.4f)",
@@ -156,6 +263,9 @@ class Aggregator:
             now - entry[0],
             base.price,
         )
+        metrics.SANITY_ESCAPES.labels(provider=base.source, reason="corroboration").inc()
+        self._sanity_reject_since.pop(symbol, None)
+        self._sanity_persist.pop(symbol, None)
         return base
 
     def get_provider(self, name: str) -> Provider | None:
@@ -173,44 +283,95 @@ class Aggregator:
         patlatiyordu (asil niyet: N GUNCELLEME TURU, N batch degil). Tur
         boyunca biriken provider->"su ana kadar HEP tam mi dustu" bilgisini
         `end_cycle()` nihai olarak degerlendirir (streak +1 / sifirlama /
-        cooldown).
+        cooldown). HIGH-3: ayni sekilde bu turda hic fresh quote alan sembol
+        var mi + guard-dusmus adaylar da (fail-open TUR-bazli karari icin)
+        burada birikmeye baslar.
         """
         self._cycle_fully_dropped = {}
         self._cooldown_probed_this_cycle = set()
-        self._cycle_fail_open_occurred = False
+        self._cycle_fresh_symbols = set()
+        self._cycle_guard_dropped_candidates = {}
+        self._cycle_previous = {}
 
-    def end_cycle(self, now: datetime | None = None) -> None:
+    def end_cycle(self, now: datetime | None = None) -> dict[str, Quote]:
         """Tur sonunda (tum batch'ler bitince) biriken durumu DEGERLENDIRIR.
 
-        `begin_cycle()` cagrilmadiysa no-op (savunma amacli). Acilis
-        toleransi (`GUARD_OPEN_GRACE_SECONDS`): seans acilisindan hemen
-        sonraki pencerede tam guard-dususleri streak'e YAZILMAZ -- guard yine
-        calisir (bayat/damgasiz veri gecmez), yalniz cooldown'u TETIKLEMEZ.
+        `begin_cycle()` cagrilmadiysa no-op (savunma amacli), bos dict doner.
 
-        LOW-2: bu turda HERHANGI bir batch fail-open'a girdiyse (bkz.
-        fetch_quotes) TUM turun guard-drop degerlendirmesi atlanir --
-        fail-open zaten sistemik bir isaret oldugundan, ayni turun BASKA
-        batch'lerinde biriken "tam dustu" bilgisi de suphelidir; hicbir
-        provider'in streak'i bu turdan etkilenmemelidir.
+        HIGH-3: fail-open karari artik BURADA, TUR duzeyinde verilir --
+        eskiden HER BATCH kendi icinde (`len(symbols) >= esik`) karar
+        veriyordu; bu, watchlist/BATCH_SIZE boluminden kalan kucuk son
+        batch'i (orn. 525 sembol / 40'lik batch = kalan 5) sistemik bir
+        kesinti sirasinda bile hicbir zaman esigi asamayacagi icin
+        korumasiz birakiyordu (korunma batch boyutuna bagliydi, deterministik
+        olmayan bir emniyet) VE `count_toward_cooldown`'a BAKMADIGI icin
+        on-demand `/quotes` cagrilari da (>=esik cache-miss sembolle)
+        tetikleyebiliyordu (bkz. review). Artik: bu TURDA (TUM batch'ler)
+        HICBIR sembol taze quote almadiysa VE cikarilan guard-dusmus aday
+        sayisi esigi asarsa, biriken adaylar (MEDIUM-1: sanity'den GECIRILEREK)
+        stale=true ile dondurulur -- cagiran (updater) bunlari commit eder.
+        On-demand cagrilar begin_cycle() hic cagirmadigi icin bu yola HICBIR
+        ZAMAN giremez (cycle state'i mevcut degildir).
+
+        Acilis toleransi (`GUARD_OPEN_GRACE_SECONDS`): seans acilisindan
+        hemen sonraki pencerede tam guard-dususleri streak'e YAZILMAZ -- guard
+        yine calisir (bayat/damgasiz veri gecmez), yalniz cooldown'u TETIKLEMEZ.
+
+        LOW-2: bu turda fail-open tetiklendiyse TUM turun guard-drop
+        degerlendirmesi (provider streak/cooldown) atlanir -- fail-open
+        zaten sistemik bir isaret oldugundan, ayni turun provider'lara ait
+        "tam dustu" bilgisi de suphelidir.
         """
         accumulated = self._cycle_fully_dropped
-        fail_open_occurred = self._cycle_fail_open_occurred
+        fresh_symbols = self._cycle_fresh_symbols
+        guard_candidates = self._cycle_guard_dropped_candidates
+        cycle_previous = self._cycle_previous
         self._cycle_fully_dropped = None
         self._cooldown_probed_this_cycle = None
-        self._cycle_fail_open_occurred = False
+        self._cycle_fresh_symbols = None
+        self._cycle_guard_dropped_candidates = None
+        self._cycle_previous = None
         if accumulated is None:
-            return
-        if fail_open_occurred:
+            return {}
+
+        fail_open_result: dict[str, Quote] = {}
+        if (
+            not fresh_symbols
+            and guard_candidates
+            and len(guard_candidates) >= settings.guard_fail_open_min_symbols
+        ):
+            for s, q in guard_candidates.items():
+                # MEDIUM-1: fail-open'in KENDISI sanity-check'i ATLAMAMALI --
+                # aksi halde absurt bir fiyat + bayat damga birlikte commit
+                # edilip `previous`'i kalici olarak zehirleyebilir (CRITICAL-1
+                # ile birlesince zehir KALICI olurdu).
+                if self._is_sane(s, q, cycle_previous):
+                    q.stale = True
+                    fail_open_result[s] = q
+            if fail_open_result:
+                metrics.GUARD_FAIL_OPEN.inc()
+                logger.critical(
+                    "%d sembolluk bir TURDA (esik %d) hicbir kaynak taze veri "
+                    "uretemedi -- piyasa-acik varsayimi (tatil listesi/"
+                    "last_trading_day?) hatali olabilir; guard bu TUR icin "
+                    "FAIL-OPEN yapildi (veri geciyor, cooldown tetiklenmedi).",
+                    len(fail_open_result),
+                    settings.guard_fail_open_min_symbols,
+                )
+
+        if fail_open_result:
             logger.debug(
                 "Bu turda fail-open olustu -- guard-drop streak degerlendirmesi "
                 "TUM tur icin atlandi (sistemik sinyal, provider'a atfedilmez)."
             )
-            return
+            return fail_open_result
+
         moment = now or datetime.now(UTC)
         since_open = seconds_since_open(moment)
         in_grace = since_open is not None and since_open < settings.guard_open_grace_seconds
         for provider_name, fully_dropped in accumulated.items():
             self._apply_cycle_guard_result(provider_name, fully_dropped, in_grace)
+        return fail_open_result
 
     def _apply_cycle_guard_result(
         self, provider_name: str, fully_dropped: bool, in_grace: bool
@@ -292,13 +453,15 @@ class Aggregator:
         """Semboller icin coklu-kaynak fiyat cekimi.
 
         `count_toward_cooldown` (HIGH-2): bu cagrinin guard-drop sonucu
-        provider-seviyesi cooldown streak'ine (bkz. begin_cycle/end_cycle)
-        YAZILSIN mi? Yalniz updater'in yapilandirilmis TUR dongusu (tum
-        takip listesini kapsayan, temsili buyuklukte batch'ler) True gecer.
-        On-demand / tek-sembol cagrilar (pipeline.fetch_quotes, drift
-        monitorun eksik-sembol tamamlamasi) varsayilan False kalir -- aksi
-        halde bugun islem gormemis TEK bir hissenin tekrarli sorgulanmasi,
-        koca bir kaynagi TUM semboller icin cooldown'a sokabilirdi.
+        provider-seviyesi cooldown streak'ine VE HIGH-3 fail-open TUR
+        muhasebesine (bkz. begin_cycle/end_cycle) YAZILSIN mi? Yalniz
+        updater'in yapilandirilmis TUR dongusu (tum takip listesini kapsayan,
+        temsili buyuklukte batch'ler) True gecer. On-demand / tek-sembol
+        cagrilar (pipeline.fetch_quotes, drift monitorun eksik-sembol
+        tamamlamasi) varsayilan False kalir -- aksi halde bugun islem
+        gormemis TEK bir hissenin tekrarli sorgulanmasi, koca bir kaynagi TUM
+        semboller icin cooldown'a sokabilir VEYA fail-open'i yanlislikla
+        tetikleyebilirdi (HIGH-3b).
         """
         mode = settings.provider_mode.lower()
         gapfill = mode in ("gapfill", "hybrid")
@@ -309,14 +472,12 @@ class Aggregator:
         moment = now or datetime.now(UTC)
         market_open_now = is_market_open(moment)
         # HIGH-3: guard'in dusurdugu (silinmeden ONCE saklanan) adaylar --
-        # TUM kaynaklar TUM sembolleri guard'la duserse (sistemik bir isaret,
-        # bkz. asagidaki fail-open blogu) buradan geri alinabilsin diye.
-        # Ilk-kazanir oncelikle (ayni oncelik sirasi normal sonuclarla ayni).
+        # bu TURDA (begin_cycle/end_cycle) hicbir sembol fresh olmadiysa
+        # end_cycle() bunlari geri alabilsin diye. Ilk-kazanir oncelikle
+        # (ayni oncelik sirasi normal sonuclarla ayni).
         guard_dropped_candidates: dict[str, Quote] = {}
         # HIGH-1: bu BATCH'in (bu tek fetch_quotes cagrisinin) provider basina
-        # sonucu -- cycle biriktiricisine ancak batch SONUNDA (fail-open
-        # kontrolunden SONRA) merge edilir; boylece bir fail-open batch'i
-        # cycle sayacini KIRLETMEZ (asagiya bakin).
+        # sonucu -- cycle biriktiricisine ancak batch SONUNDA merge edilir.
         batch_fully_dropped: dict[str, bool] = {}
 
         for provider, breaker in self._providers:
@@ -460,9 +621,8 @@ class Aggregator:
             # (hicbir sey hayatta kalmadigi) BATCH -- provider bu sembolleri
             # "cevapladi" ama tumu politika geregi (bayat/damgasiz) elendi.
             # symbol_circuit bunu basarisizlik SAYMAZ (MEDIUM-3). Bu batch'in
-            # sonucu (HENUZ cycle biriktiricisine YAZILMAZ -- ancak asagida,
-            # fail-open kontrolunden SONRA merge edilir; bkz. begin_cycle/
-            # end_cycle docstring'i).
+            # sonucu (HENUZ cycle biriktiricisine YAZILMAZ -- ancak asagida
+            # merge edilir; bkz. begin_cycle/end_cycle docstring'i).
             batch_fully_dropped[provider.name] = bool(guard_dropped) and not fetched
 
             if is_cooldown_probe and not batch_fully_dropped[provider.name]:
@@ -478,14 +638,28 @@ class Aggregator:
                 breaker.record_success()
                 metrics.PROVIDER_UP.labels(provider=provider.name).set(1)
             elif gapfill:
-                # Gapfill'de fallback yalnizca onceki kaynaklarin bulamadigi (zor /
-                # illikit) sembolleri sorar; dusuk kapsama provider sagligini DEGIL
-                # sembol yoklugunu gosterir. Yanit geldi (exception yok) -> saglikli
-                # say, circuit'i actirma. Gercek coku exception yolunda yakalanir.
-                # Aksi halde illikit semboller fallback'leri bosuna devre disi birakip
-                # legitim eksik sembollerin kapsamasini dusururdu.
-                breaker.record_success()
-                metrics.PROVIDER_UP.labels(provider=provider.name).set(1)
+                if batch_fully_dropped[provider.name]:
+                    # HIGH-1(b): `ask`'in TAMAMI guard'la (bayat-bar/damgasiz)
+                    # dustuyse bu "sembol yoklugu" degil GUARD'IN KENDISIDIR --
+                    # record_success() YAZILMAZ (breaker/PROVIDER_UP durumu
+                    # DEGISTIRILMEZ). Aksi halde kitlesel guard-dusmesi
+                    # provider'i yanlislikla "saglikli" gosterirdi -- bu,
+                    # store.fresh_ratio'nun `updated_at`'e (cache YAZIM ani,
+                    # gercek veri yasi degil) bakmasiyla birlesince fail-open
+                    # sirasinda HICBIR alarmin calmadigi review bulgusuydu.
+                    logger.debug(
+                        "%s: ask'in tamami guard'la dustu -- breaker durumu degistirilmedi",
+                        provider.name,
+                    )
+                else:
+                    # Gapfill'de fallback yalnizca onceki kaynaklarin bulamadigi (zor /
+                    # illikit) sembolleri sorar; dusuk kapsama provider sagligini DEGIL
+                    # sembol yoklugunu gosterir. Yanit geldi (exception yok) -> saglikli
+                    # say, circuit'i actirma. Gercek coku exception yolunda yakalanir.
+                    # Aksi halde illikit semboller fallback'leri bosuna devre disi birakip
+                    # legitim eksik sembollerin kapsamasini dusururdu.
+                    breaker.record_success()
+                    metrics.PROVIDER_UP.labels(provider=provider.name).set(1)
             else:
                 hit = sum(1 for s in ask if s in fetched)
                 ratio = hit / len(ask) if ask else 0.0
@@ -526,62 +700,32 @@ class Aggregator:
             if not gapfill and result:
                 break
 
-        # HIGH-3/HIGH-1(review-2): fail-open emniyet supabi. `result` TAMAMEN
-        # bos VE istenen batch TEMSILI BUYUKLUKTEYSE (`len(symbols) >=
-        # GUARD_FAIL_OPEN_MIN_SYMBOLS`) fail-open tetiklenir -- KAYNAK SAYISINA
-        # DEGIL boyuta bagli: TV cikti + isyatirim EOD-only oldugu icin seans
-        # icinde TEK intraday kaynak (yahoo_chart) kaldi; "en az 2 kaynak"
-        # sarti seans icinde YAPISAL OLARAK asla saglanamaz, fail-open'i
-        # olu birakirdi (bilinmeyen tatilde tum gun karanlik + sayac hic
-        # artmaz). Buyuk/cesitli bir batch'in TAMAMININ TEK bir kaynaktan bile
-        # ayni anda guard'a dusmesi tesadufi degildir -- "piyasa-acik
-        # varsayimimiz (tatil listesi / last_trading_day?) yanlis" sinyalidir.
-        # Kucuk batch'ler (on-demand tek-sembol dahil) esigin altinda kalip
-        # fail-open'i tetiklemez (LOW ihtimalli tekil "bugun islem gormedi"
-        # sembolleriyle karistirilmasin diye).
-        if (
-            not result
-            and guard_dropped_candidates
-            and len(symbols) >= settings.guard_fail_open_min_symbols
-        ):
-            for s, q in guard_dropped_candidates.items():
-                q.stale = True
-                result[s] = q
-            metrics.GUARD_FAIL_OPEN.inc()
-            logger.critical(
-                "%d sembolluk (esik %d) bir batch'te hicbir kaynak taze veri "
-                "uretemedi -- piyasa-acik varsayimi (tatil listesi/"
-                "last_trading_day?) hatali olabilir; guard bu batch icin "
-                "FAIL-OPEN yapildi (veri geciyor, cooldown tetiklenmedi).",
-                len(symbols),
-                settings.guard_fail_open_min_symbols,
-            )
-            # LOW-2: fail-open sistemik bir isarettir -- bu TURDEKI (aktif bir
-            # cycle varsa) BASKA batch'lerin "tam dustu" bilgisi de suphelidir;
-            # tum turun guard-drop degerlendirmesi end_cycle()'da VETO edilir.
-            if self._cycle_fully_dropped is not None:
-                self._cycle_fail_open_occurred = True
-            # LOW-1: eskiden burada erken `return result` vardi -- bu, AYNI
-            # batch'teki ILGISIZ (guard'la degil SANITY ile reddedilen)
-            # sembollerin kacis (escape) firsatini sessizce atliyordu (o an
-            # erisilemez bir kod yoluydu, ama artik fail-open koşulu
-            # gevsedigi icin CANLI bir bug olurdu). Artik asagi DEVAM eder --
-            # rejected/escape blogu normal calisir.
-        elif count_toward_cooldown and self._cycle_fully_dropped is not None:
-            # HIGH-1: batch'in guard-drop sonucunu cycle biriktiricisine merge
-            # et (yalniz count_toward_cooldown=True VE aktif bir cycle varsa;
-            # bkz. begin_cycle/end_cycle). Fail-open TETIKLENMEDIYSE buraya
-            # ulasilir.
-            for provider_name, full_guard_drop in batch_fully_dropped.items():
-                prev = self._cycle_fully_dropped.get(provider_name, True)
-                self._cycle_fully_dropped[provider_name] = prev and full_guard_drop
-
         for s, candidates in rejected.items():
             if s in result:
                 continue
-            escaped = self._try_escape(s, candidates)
+            escaped = self._try_escape(s, candidates, previous)
             if escaped is not None:
                 result[s] = escaped
+
+        # HIGH-3: bu batch'in TUR biriktiricisine katkisi -- yalniz
+        # count_toward_cooldown=True VE aktif bir cycle varsa (bkz.
+        # begin_cycle/end_cycle). On-demand cagrilar (varsayilan False)
+        # hicbir zaman buraya girmez -- fail-open TUR muhasebesi (HIGH-3b)
+        # ve provider guard-drop streak'i yalniz updater'in yapilandirilmis
+        # dongusunden beslenir.
+        if count_toward_cooldown and self._cycle_fully_dropped is not None:
+            cycle_fully_dropped = self._cycle_fully_dropped
+            for provider_name, full_guard_drop in batch_fully_dropped.items():
+                prev = cycle_fully_dropped.get(provider_name, True)
+                cycle_fully_dropped[provider_name] = prev and full_guard_drop
+            if self._cycle_fresh_symbols is not None:
+                self._cycle_fresh_symbols.update(result.keys())
+            if self._cycle_guard_dropped_candidates is not None:
+                for s, q in guard_dropped_candidates.items():
+                    if s not in result:
+                        self._cycle_guard_dropped_candidates[s] = q
+            if previous and self._cycle_previous is not None:
+                self._cycle_previous.update(previous)
 
         return result
 

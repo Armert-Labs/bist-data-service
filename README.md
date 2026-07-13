@@ -113,24 +113,72 @@ için (bkz. `delayed: true`) kaynakların açılışta bugüne ait bir damga
 > nesneleri olduğu için bu gauge doğal olarak yalnızca updater sürecinin
 > `:8001/metrics`'inde anlamlıdır.
 
-**Fail-open emniyet supabı (`bist_guard_fail_open_total`):** bir batch'teki
-sembollerin **TAMAMI** guard'la düşerse VE bu batch **temsili büyüklükteyse**
-(`len(symbols) >= GUARD_FAIL_OPEN_MIN_SYMBOLS`, vars. 20) fail-open tetiklenir
-— **kaynak sayısına değil batch büyüklüğüne bağlıdır** (TradingView çıktı +
-İş Yatırım EOD-only olduğu için seans içinde tek kaynak kaldı; "en az 2
-kaynak" şartı bu dünyada hiç sağlanamaz, fail-open'i ölü bırakırdı). Büyük/
-çeşitli bir sembol kümesinin TAMAMININ tek bir kaynaktan bile aynı anda
-guard'a düşmesi tesadüfi değildir, genellikle bir kaynak arızası değil
-**piyasa-açık varsayımının** (örn. `MARKET_HOLIDAYS` listesinde eksik bir
-resmi tatil) **yanlış** olduğunun işaretidir. Küçük kümeler (on-demand
-tek-sembol istekleri dahil, `len(symbols)=1`) eşiğin altında kalır, fail-open'i
-hiç tetiklemez. Tetiklendiğinde: guard o batch için geçici olarak devre dışı
-bırakılır, elde bulunan (guard'ın düşürdüğü) veri `stale=true` işaretiyle
-geçirilir (bu bayrak `/quote`, `/quotes`, `/all`, `/stream` yanıtlarında
-KORUNUR — yaş-tabanlı hesap onu asla ezmez), hiçbir kaynak cooldown'a girmez
-(sistemik bir sorun tek bir kaynağa atfedilmez; aynı turdaki BAŞKA batch'lerin
-guard-drop bilgisi de bu yüzden veto edilir) ve bir CRITICAL log + sayaç
-artışı operatörü uyarır.
+**Fail-open emniyet supabı (`bist_guard_fail_open_total`):** karar artık
+**BATCH değil TUR (cycle) düzeyinde** verilir (`begin_cycle`/`end_cycle`,
+updater'ın tam bir güncelleme döngüsü): bu TURDA (tüm batch'ler) **hiçbir
+sembol taze quote almadıysa** VE guard'ın düşürdüğü toplam aday sayısı
+**temsili büyüklükteyse** (`>= GUARD_FAIL_OPEN_MIN_SYMBOLS`, vars. 20)
+fail-open tetiklenir — **kaynak sayısına değil TURUN TOPLAM boyutuna
+bağlıdır** (TradingView çıktı + İş Yatırım EOD-only olduğu için seans içinde
+tek kaynak kaldı; "en az 2 kaynak" şartı bu dünyada hiç sağlanamaz, fail-open'i
+ölü bırakırdı). Eskiden (batch-bazlı) karar, `watchlist/BATCH_SIZE`
+bölümünden kalan **küçük son batch'i** (örn. 525 sembol / 40'lık batch =
+kalan 5) sistemik bir kesinti sırasında bile hiçbir zaman eşiği aşamayacağı
+için korumasız bırakıyordu (korunma `len(watchlist) % BATCH_SIZE`'a bağlıydı
+— deterministik olmayan bir emniyet); artık TUR'un TOPLAMI değerlendirildiği
+için küçük kalıntı batch de dahil TÜM semboller kurtarılır. Büyük/çeşitli bir
+sembol kümesinin TAMAMININ tek bir kaynaktan bile aynı anda guard'a düşmesi
+tesadüfi değildir, genellikle bir kaynak arızası değil **piyasa-açık
+varsayımının** (örn. `MARKET_HOLIDAYS` listesinde eksik bir resmi tatil)
+**yanlış** olduğunun işaretidir. **Yalnızca updater'ın yapılandırılmış TUR
+döngüsü** (`count_toward_cooldown=True`) bu değerlendirmeye girer — on-demand
+`/quotes?symbols=` gibi istekler `begin_cycle()`'ı hiç çağırmadığı için
+fail-open'i **asla** tetiklemez (küçük kümeler de zaten eşiğin altında
+kalırdı, ama artık yapısal olarak imkânsız). Tetiklendiğinde: guard'ın
+düşürdüğü aday veri **sanity-check'ten de geçirilir** (absürt bir fiyat +
+bayat damga birlikte commit edilip `previous`'i kalıcı olarak zehirlemesin),
+`stale=true` işaretiyle geçirilir (bu bayrak `/quote`, `/quotes`, `/all`,
+`/stream` yanıtlarında KORUNUR — yaş-tabanlı hesap onu asla ezmez, okuma
+anında `bar_time` de ayrıca kontrol edilir), hiçbir kaynak cooldown'a girmez
+(sistemik bir sorun tek bir kaynağa atfedilmez; aynı turdaki provider
+guard-drop streak değerlendirmesi de bu yüzden veto edilir) ve bir CRITICAL
+log + sayaç artışı operatörü uyarır. `stale=true` quote'lar `store.
+fresh_ratio()`/`is_stale()` tarafından **taze SAYILMAZ** (`/ready` doğru
+şekilde 503 döner) ve `oldest_update_age()`/`bist_oldest_quote_age_seconds`
+bunların yaşını `updated_at` (cache yazım anı) yerine **gerçek veri
+zamanından** (`exchange_time`/`bar_time`) hesaplar — fail-open sırasında
+saatler önceki bir bar saniyelere küçültülüp operatörü yanıltmaz.
+
+### 🔓 Sanity-check kaçış yolları (bedelsiz/split sonrası kalıcı kilit kırılması)
+
+Sanity-check bir önceki fiyata göre absürt (`SANITY_MAX_CHANGE_PCT`, vars.
+%60) bir sıçramayı reddeder — ama bedelsiz sermaye artırımı/split sonrası
+**gerçek** bir fiyat da aynı derecede "absürt" görünür (örn. %200 bedelsiz
+sonrası 200 TL → 66 TL). Tek intraday kaynaklı dünyada (yukarıya bakın) bu
+kilidi kıracak **iki bağımsız kaçış yolu** vardır (üçüncüsü — çoklu-kaynak
+uzlaşısı — Faz-2 için korunur ama bugün hiç tetiklenemez, `candidates` her
+zaman <2 kalır):
+
+1. **İç tutarlılık (`reason=consistency`):** kaynağın kendi `previous_close`
+   alanı yeni `price` ile tutarlıysa (kaynak "bu düşüş gerçek, önceki
+   kapanışımı da düzelttim" diyor) VE bu restated `previous_close` bizim
+   bildiğimiz önceki fiyattan da önemli ölçüde farklıysa (gerçek bir baz
+   değişikliği sinyali) **tek turda, tek kaynaktan, anında** kabul edilir.
+2. **Israr teyidi (`reason=persistence`, `SANITY_ESCAPE_PERSIST_ROUNDS` vars.
+   3):** aynı kaynak aynı (±`SANITY_ESCAPE_PERSIST_TOLERANCE_PCT` vars. %1
+   içindeki) aykırı fiyatı **N ardışık TURDA** (`fetch_quotes()` çağrısı
+   başına bir kez — aynı batch içinde birden fazla kaynak denense bile) tekrar
+   ederse kabul edilir; geçici bir tick hatası ısrar etmez, kurumsal işlem
+   (bedelsiz/split) eder. Escape penceresinden (`SANITY_REJECT_ESCAPE_SECONDS`)
+   uzun bir fetch boşluğu (restart/kesinti) "ardışıklığı" bozar, sayaç sıfırlanır.
+
+Her iki yolda da kabul `bist_sanity_escapes_total{provider,reason}` sayacını
+artırır ve bir CRITICAL log basar. **Neden gerekli:** eski tasarım kaçışı
+`len(candidates) >= 2` (en az iki bağımsız kaynağın uzlaşması) şartına
+bağlıyordu — ama seans içinde fiilen tek kaynak (`yahoo_chart`) kaldığı için
+bu şart YAPISAL OLARAK asla sağlanamaz, escape ölü kalır ve bedelsiz/split
+sonrası sembol **kalıcı olarak** sanity'de kilitlenirdi (restart bile
+kurtarmazdı — reddedilen quote store'a hiç yazılmaz).
 
 ### ⚖️ TradingView'in varsayılan zincirden çıkarılması (hukuki karar) + bilinen açık maddeler
 
@@ -162,6 +210,14 @@ bağlı açık madde):**
   artar. Bu, HIGH-2 fix'inin sağladığı kazanımın bilinçli olarak geri
   alınması demektir — gerçek (lisanslı) bir realtime referans kaynağı
   gelene kadar başka çözümü yok.
+- **Sembol evreni (takip listesi) hâlâ TradingView'den geliyor** (MEDIUM-3,
+  **PATRON KARARI: KALSIN** — ücretsiz, çalışıyor): fiyat zinciri
+  TradingView'den tamamen arındırıldı, ama `SYMBOL_UNIVERSE_REFRESH_ENABLED`
+  (vars. açık) periyodik olarak TradingView'in scanner'ından **hangi BIST
+  sembollerinin var olduğunu** çeker (fiyat/referans DEĞİL, yalnızca dizin).
+  Bu, ToS §3'ün yasakladığı "otomatik işlem/fiyat referanslama" kullanımının
+  dışında kalır — bilinçli, kabul edilmiş bir kalıntı risktir; kod değişikliği
+  planlanmıyor.
 
 ---
 
@@ -829,7 +885,9 @@ Ayrıntılar için [CONTRIBUTING.md](CONTRIBUTING.md).
 | `GUARD_COOLDOWN_SECONDS` | `1800` | Cooldown süresi (sn) — bu sürede kaynak sorgulanmaz, sonra yeniden denenir |
 | `GUARD_OPEN_GRACE_SECONDS` | `1200` | Seans açılışından sonraki bu kadar saniye içindeki guard-düşüşleri cooldown sayacına yazılmaz (20 dk = ~15 dk veri gecikmesi + tampon) |
 | `GUARD_DROP_STREAK_MAX_AGE_SECONDS` | `900` | Son artıştan bu kadar saniye sonra hâlâ yeni bir tam-düşme olmadıysa sayaç geçersiz sayılır (yaşlanma) |
-| `GUARD_FAIL_OPEN_MIN_SYMBOLS` | `20` | Bir batch'in TAMAMI guard'la düşerse fail-open'ın tetiklenmesi için gereken minimum sembol sayısı (kaynak sayısına değil batch büyüklüğüne bağlı eşik) |
+| `GUARD_FAIL_OPEN_MIN_SYMBOLS` | `20` | Bir TURDA (batch değil, `begin_cycle`/`end_cycle`) hiçbir sembol taze quote almazsa fail-open'ın tetiklenmesi için gereken minimum guard-düşmüş aday sayısı — kaynak sayısına değil TURUN TOPLAM boyutuna bağlı eşik |
+| `SANITY_ESCAPE_PERSIST_ROUNDS` | `3` | Tek intraday kaynaklı dünyada sanity-kilidini kırmanın TEK yolu: aynı kaynak aynı aykırı fiyatı bu kadar ardışık TURDA tekrarlarsa kabul edilir (0=kapalı) |
+| `SANITY_ESCAPE_PERSIST_TOLERANCE_PCT` | `1.0` | Israr teyidinde "aynı fiyat" sayılması için ardışık turlar arası izin verilen sapma (%) |
 | `UPDATE_INTERVAL` | `60` | Güncelleme aralığı (sn) |
 | `STALENESS_SECONDS` | `300` | Bayatlık eşiği (`/ready`) |
 | `RATE_LIMIT` | `120/minute` | IP başına limit |

@@ -98,6 +98,74 @@ async def test_stale_grace_period_after_open(monkeypatch):
     assert await store.is_stale() is False
 
 
+async def test_stale_flagged_quote_does_not_count_as_fresh(monkeypatch, override_settings):
+    """HIGH-1: fail-open (bkz. aggregator.end_cycle) `stale=True` isaretiyle
+    commit ettigi bir quote'un `updated_at`'i cache YAZIM anini gosterir
+    (GERCEK veri yasini degil) -- yalniz `updated_at`'e bakan bir fresh_ratio
+    fail-open sirasinda HER SEYI "taze" sanip `/ready`'yi yanlislikla
+    yesile cevirirdi, hicbir alarm calmazdi. `stale=True` quote artik TAZE
+    SAYILMAZ."""
+    from datetime import UTC, datetime
+
+    override_settings(staleness_min_fresh_pct=90.0)
+    store = MemoryStore()
+    await store.connect()
+    now = datetime.now(UTC)
+    # 20 sembolun HEPSI fail-open ile stale=True + updated_at=simdi commit edildi.
+    quotes = {
+        f"S{i:02d}": Quote(symbol=f"S{i:02d}", price=1.0, updated_at=now, stale=True)
+        for i in range(20)
+    }
+    await store.set_quotes(quotes)
+
+    monkeypatch.setattr("app.market.seconds_since_open", lambda now=None: 3600.0)
+    assert await store.fresh_ratio() == 0.0
+    assert await store.is_stale() is True
+
+
+async def test_oldest_update_age_uses_real_data_time_for_stale_quotes():
+    """HIGH-1 kardes bulgu: `stale=True` isaretli bir quote'ta `updated_at`
+    cache YAZIM anini gosterir -- yalniz ona bakan bir yas hesabi fail-open
+    sirasinda cache-yazimiyla SIFIRLANIR, `bist_oldest_quote_age_seconds`
+    metrigini ve `/ready`'nin `oldest_quote_age_seconds` alanini yaniltir.
+    Artik stale=True quote'larda yas GERCEK veri zamanindan (exchange_time)
+    hesaplanir -- saatler once bir bar'in yasi saniyelere KUCULTULMEZ."""
+    from datetime import UTC, datetime, timedelta
+
+    store = MemoryStore()
+    await store.connect()
+    now = datetime.now(UTC)
+    yesterday_bar = now - timedelta(hours=20)
+    await store.set_quotes(
+        {
+            "THYAO": Quote(
+                symbol="THYAO",
+                price=1.0,
+                updated_at=now,  # cache YAZIM ani -- "simdi"
+                exchange_time=yesterday_bar,  # GERCEK veri ani -- 20 saat once
+                stale=True,
+            )
+        }
+    )
+    age = await store.oldest_update_age()
+    assert age is not None
+    assert age > 3600 * 15  # cache-yazim yasina (saniyeler) gore DEGIL, gercek bar yasina gore
+
+
+async def test_oldest_update_age_still_uses_updated_at_for_fresh_quotes():
+    """Regresyon kilidi: stale=False (normal) quote'larda davranis DEGISMEDI --
+    yas hala `updated_at`'ten hesaplanir."""
+    from datetime import UTC, datetime, timedelta
+
+    store = MemoryStore()
+    await store.connect()
+    old = datetime.now(UTC) - timedelta(seconds=120)
+    await store.set_quotes({"THYAO": Quote(symbol="THYAO", price=1.0, updated_at=old, stale=False)})
+    age = await store.oldest_update_age()
+    assert age is not None
+    assert 110 <= age <= 130
+
+
 async def test_negative_cache():
     store = MemoryStore()
     await store.connect()

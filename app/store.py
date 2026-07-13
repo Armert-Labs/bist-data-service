@@ -30,6 +30,25 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _real_data_age_seconds(q: Quote, now: datetime) -> float | None:
+    """HIGH-1 (kardes bulgu): `stale=True` isaretli bir quote'ta `updated_at`
+    cache YAZIM anini gosterir (GERCEK veri yasini degil) -- fail-open (bkz.
+    aggregator.end_cycle) veya baska bir mekanizma boyle bir quote'u bilerek
+    stale isaretleyip yine de commit ettiginde, yalniz `updated_at`'e bakan
+    bir yas hesabi cache-yazimiyla SIFIRLANIR; bu, `bist_oldest_quote_age_seconds`
+    metrigini ve ona bakan `/ready`'nin `oldest_quote_age_seconds` alanini
+    yaniltir (fresh_ratio()/is_stale() icin zaten kapatilan ayni korlugun
+    farkli bir alandan sizmasi). `stale=True` quote'larda yas GERCEK veri
+    zamanindan (`exchange_time or bar_time or updated_at` onceligiyle)
+    hesaplanir; digerleri (fresh quote'larda ikisi zaten yakinsar) mevcut
+    davranisla `updated_at`'ten hesaplanmaya devam eder. `oldest_update_age()`
+    ve `fresh_ratio()` (dolayisiyla /ready + metrik) AYNI sozlesmeyi paylasir."""
+    reference = (q.exchange_time or q.bar_time or q.updated_at) if q.stale else q.updated_at
+    if reference is None:
+        return None
+    return (now - reference).total_seconds()
+
+
 class Store(ABC):
     @abstractmethod
     async def connect(self) -> None: ...
@@ -84,21 +103,33 @@ class Store(ABC):
     async def get_intraday(self, symbol: str) -> list[dict]: ...
 
     async def oldest_update_age(self) -> float | None:
-        """En eski sembol guncelleme yasi (sn). Staleness icin kullanilir."""
+        """En eski sembol guncelleme yasi (sn). Staleness icin kullanilir.
+
+        bkz. `_real_data_age_seconds`: `stale=True` isaretli quote'larda yas
+        cache-yazim ani degil GERCEK veri zamanindan hesaplanir."""
         data = await self.get_all()
         if not data:
             return None
         now = _now()
         ages: list[float] = []
         for q in data.values():
-            if q.updated_at is not None:
-                ages.append((now - q.updated_at).total_seconds())
+            age = _real_data_age_seconds(q, now)
+            if age is not None:
+                ages.append(age)
         return max(ages) if ages else None
 
     async def fresh_ratio(self) -> float | None:
         """Taze (yasi staleness esiginin altinda) sembol orani; veri yoksa None.
 
-        updated_at'i olmayan quote taze SAYILMAZ (muhafazakar)."""
+        updated_at'i olmayan quote taze SAYILMAZ (muhafazakar). HIGH-1: `stale=True`
+        isaretli quote de TAZE SAYILMAZ -- fail-open (bkz. aggregator.end_cycle)
+        veya baska bir mekanizma bir quote'u bilerek stale isaretleyip yine de
+        commit ettiginde, `updated_at` cache YAZIM anini gosterir (GERCEK veri
+        yasini degil); bu alan tek basina kullanilirsa fail-open sirasinda
+        `/ready` "saglikli" gorunur, hicbir alarm calmazdi (bkz. review). Ayni
+        kordugun `bist_oldest_quote_age_seconds` metrigine sizmamasi icin
+        `oldest` de `_real_data_age_seconds` ile (stale=True icin GERCEK veri
+        zamanindan) hesaplanir."""
         data = await self.get_all()
         if not data:
             return None
@@ -106,11 +137,13 @@ class Store(ABC):
         fresh = 0
         oldest: float | None = None
         for q in data.values():
-            if q.updated_at is None:
+            age = _real_data_age_seconds(q, now)
+            if age is None:
                 continue
-            age = (now - q.updated_at).total_seconds()
             if oldest is None or age > oldest:
                 oldest = age
+            if q.stale:
+                continue
             if age <= settings.staleness_seconds:
                 fresh += 1
         if oldest is not None:
