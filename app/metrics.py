@@ -68,3 +68,9 @@ PROVIDER_GUARD_COOLDOWN = Gauge(
     "Kaynak, tekrarlanan tam guard-dusmesi nedeniyle gecici cooldown'da mi (1/0)",
     ["provider"],
 )
+GUARD_FAIL_OPEN = Counter(
+    "bist_guard_fail_open_total",
+    "TUM kaynaklar TUM sembolleri guard'la dusurdugu (sistemik ariza -- tatil "
+    "listesi/piyasa-acik varsayimi hatali olabilir) icin guard'in bir tur "
+    "boyunca gecici olarak devre disi birakildigi (fail-open) sayisi",
+)

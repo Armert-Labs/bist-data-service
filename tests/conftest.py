@@ -44,3 +44,19 @@ def _disable_background(monkeypatch):
         store._last_update = None
         store._negative = {}
         store._history_cache = {}
+
+
+@pytest.fixture(autouse=True)
+def _reset_guard_cooldown_gauge():
+    """MEDIUM-1: `bist_provider_guard_cooldown` gauge process-genelinde
+    paylasilir (prometheus_client) -- bir testin biraktigi provider=X, deger=1
+    durumu, testin kendisi sifirlamadiysa SONRAKI testin (farkli/izole bir
+    Aggregator ile calisan) assertion'ina SIZAR. Ozellikle testler TEK
+    BASINA (`-k` ile) calistirildiginda -- bu durumda "onceki test sifirladi"
+    tesadufu de kaybolur -- yalitimsizlik aciga cikar. Her testten ONCE tum
+    label kombinasyonlarini temizler (deger 0'a doner)."""
+    from app import metrics
+
+    metrics.PROVIDER_GUARD_COOLDOWN._metrics.clear()
+    yield
+    metrics.PROVIDER_GUARD_COOLDOWN._metrics.clear()

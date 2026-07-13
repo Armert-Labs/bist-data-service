@@ -63,6 +63,15 @@ class Provider(ABC):
     # bu saglayiciyi ATLAR (bos yanitini "hata" sayip circuit breaker'i tetikleyip
     # ayni kaynagin QUOTE hizmetini yanlislikla devre disi birakmasin).
     supports_history: bool = True
+    # YAPISAL ONERI (review): bu kaynak seans ICINDE gun-ici (intraday) bar
+    # verebilir mi? False ise (orn. Is Yatirim -- yalnizca gunluk EOD cubuk
+    # dondurur) aggregator seans ACIKKEN bu kaynagi HIC SORGULAMAZ -- guard
+    # zaten HER turda bu kaynagin verisini dusurecegi icin (H2) sorgulamak
+    # yapisal olarak bosuna bir istektir, ARIZA degildir. Bu, guard-cooldown
+    # mekanizmasinin (asagida) ihtiyacini da azaltir: EOD-only kaynaklar seans
+    # icinde artik hic denenmedigi icin cooldown'a girecek bir "tam dusme"
+    # uretemezler.
+    intraday_capable: bool = True
 
     @abstractmethod
     async def fetch_quotes(self, symbols: list[str]) -> dict[str, Quote]:

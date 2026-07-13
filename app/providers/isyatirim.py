@@ -109,6 +109,11 @@ def parse_quote(bist_symbol: str, rows: list[dict]) -> Quote | None:
 
 class IsYatirimProvider(Provider):
     name = "isyatirim"
+    # YAPISAL ONERI (review): bu kaynak yalniz GUNLUK EOD cubuk dondurur --
+    # seans icinde gun-ici bar hic vermez. Seans acikken sorgulamak yapisal
+    # olarak bosuna bir istektir (guard zaten her turda dusurur, H2); bu
+    # bayragi False yaparak aggregator seans icinde bu kaynagi HIC sormaz.
+    intraday_capable = False
 
     def __init__(self, concurrency: int | None = None) -> None:
         self._sem = asyncio.Semaphore(concurrency or settings.isyatirim_concurrency)

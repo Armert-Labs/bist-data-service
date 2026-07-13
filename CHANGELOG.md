@@ -211,6 +211,60 @@ proje [Semantic Versioning](https://semver.org/lang/tr/) kullanır.
   - Not: Yahoo (`yahoo_chart`) da benzer bir ToS gri alanında; bu ayrı bir
     karar (lisans süreci netleşene kadar servis "dashboard-only" konumda).
 
+### Düzeltildi (devam) — cooldown/last_trading_day yeniden tasarımı (1 CRITICAL + 3 HIGH + 3 MEDIUM + LOW'lar)
+- **CRITICAL-1 (`last_trading_day` pre-open'da bugünü döndürüyordu):**
+  `market.last_trading_day()` hafta içi sabah (açılış öncesi, örn. 09:00)
+  yanlışlıkla "bugün"ü dönüyordu — ama bugünün henüz hiçbir barı yoktu (seans
+  başlamadı). Sonuç: `is_stale_bar`'ın kapalı-piyasa dalı tüm kaynakların
+  dünkü/Cuma barlarını "beklenenden eski" sanıp elerdi; updater'ın warm-up
+  turu (piyasa kapalıyken de çalışır) ve on-demand cache-miss istekleri TÜM
+  kaynakları guard'a düşürüp seans açılışının ilk ~30 dakikasında feed'i
+  karartabilirdi (uçtan uca simülasyonla kanıtlandı). Fix: bugünün kapanışı
+  henüz gelmediyse (`now.time() < close_t`) önce bir gün geriye inilir, sonra
+  hafta sonu/tatil yuvarlaması yapılır.
+- **HIGH-1 (cooldown sayacı BATCH değil TUR bazında):** bir güncelleme turu
+  ~13 `fetch_quotes()` (batch) çağrısı üretiyordu; batch-bazlı sayımda "N tur
+  üst üste" sigortası saniyeler içinde patlıyordu. `Aggregator.begin_cycle()`/
+  `end_cycle()` eklendi — bir TUR'un tüm batch'leri artık TEK bir "ardışık
+  tam-düşme" sayılır (updater `_update_once()` bunları sarmalar). Açılış
+  toleransı da eklendi: `GUARD_OPEN_GRACE_SECONDS` (varsayılan 300sn) içindeki
+  düşüşler sayaca yazılmaz (kaynaklar açılışın ilk saniyelerinde henüz dünkü
+  barlarını güncellemiyor olabilir).
+- **HIGH-2 (on-demand istek cooldown tetikliyordu):** tek-sembol on-demand
+  sorgular (`/quote/{symbol}` cache-miss) bir sembol guard'a düşünce koca bir
+  kaynağı TÜM semboller için cooldown'a sokabiliyordu. `fetch_quotes()`'a
+  `count_toward_cooldown: bool = False` (keyword-only) parametresi eklendi;
+  yalnızca updater'ın yapılandırılmış döngüsü `True` geçer. Bu, aynı zamanda
+  **MEDIUM-3**'ü de çözer: Redis'siz (tek-instance) dağıtımda bile on-demand
+  yol asla cooldown state'ini YAZMAZ (yalnızca mevcut bir cooldown'a saygı
+  gösterir) — `bist_provider_guard_cooldown` gauge'u yalnızca updater'ın
+  döngüsünden beslenir.
+- **HIGH-3 (eksik tatil listesi → tüm gün kitlesel düşüş + cooldown):**
+  `MARKET_HOLIDAYS` listesinde olmayan resmi bir tatilde tüm kaynaklar aynı
+  anda "bayat" görünüp tüm gün düşer ve cooldown'a girerdi. Fail-open emniyet
+  supabı eklendi: **birden fazla bağımsız kaynak** aynı turda **tüm
+  sembolleri** guard'la düşürürse (tek kaynak değil — bu ayrım yapılamaz,
+  güvenli varsayılan cooldown yoludur) guard o tur için devre dışı bırakılır,
+  elde bulunan veri `stale=true` ile geçirilir, hiçbir kaynak cooldown'a
+  girmez, `bist_guard_fail_open_total` sayacı artar + CRITICAL log basılır.
+- **MEDIUM-1 (test sırası bağımlılığı):** `bist_provider_guard_cooldown`
+  gauge'u process-genelinde paylaşıldığı için bir testin bıraktığı durum
+  izolasyonda (`pytest -k`) sonraki teste sızıyordu. `conftest.py`'de autouse
+  fixture eklendi (her testten önce/sonra sıfırlar).
+- **MEDIUM-2 (streak'te zaman aşımı yoktu):** sabah erken saatte birikmiş bir
+  sayaç saatlerce durup öğleden sonraki TEK kötü turla cooldown'a
+  dönüşebiliyordu. `GUARD_DROP_STREAK_MAX_AGE_SECONDS` (varsayılan 900sn)
+  eklendi — son artıştan bu süre sonra sayaç geçersiz sayılır.
+- **LOW'lar:** guard log'u piyasa kapalıyken de "seans açık" diyordu (artık
+  duruma göre değişir); `market_close_time()` docstring'i güncellendi
+  (`exchange_time` değil `bar_time` — HIGH-4 ile tutarlı); `is_stale_bar`'ın
+  yanıltıcı `exchange_time` parametre adı `bar_or_exchange_time` oldu.
+- **Yapısal iyileştirme:** `Provider.intraday_capable` (varsayılan `True`)
+  eklendi; İş Yatırım (`IsYatirimProvider`, yalnızca günlük EOD verir)
+  `False` yapıldı — seans **açıkken** bu kaynak artık **hiç sorgulanmaz**
+  (guard zaten her turda düşüreceği için sorgulamak yapısal olarak bosuna bir
+  istekti). Bu, cooldown mekanizmasının ihtiyacını da azaltır.
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi

@@ -71,42 +71,67 @@ def market_state(now: datetime | None = None) -> str:
 
 
 def last_trading_day(now: datetime | None = None, holidays: frozenset[str] | None = None) -> date:
-    """En son (bugun dahil) islem gunu -- hafta sonu/tatilse GERIYE dogru en
-    yakin islem gunune yuvarlar.
+    """En son KAPANMIS (tamamlanmis) islem gunu -- hafta sonu/tatilse veya
+    bugunun seansi henuz kapanmadiysa GERIYE dogru en yakin kapanmis islem
+    gunune yuvarlar.
 
     Kapali-piyasa guard kontrolu icin (bkz. is_stale_bar) "son mesru kapanis
     hangi gune ait olmali" sorusuna cevap verir.
+
+    CRITICAL-1: eskiden bugunun seansi henuz ACILMAMIS olsa bile (orn. hafta
+    ici sabah 09:00, acilis 10:00) "bugun" donduruluyordu -- ama bugunun
+    HENUZ hicbir bari yok (seans baslamadi). is_stale_bar bu durumda TUM
+    kaynaklarin (dunku/Cuma kapanisi tasiyan) barlarini "beklenenden eski"
+    sanip elerdi -- seans acilisinda updater'in warm-up turu (piyasa kapaliyken
+    de calisir) ve on-demand cache-miss istekleri TUM kaynaklari guard'a
+    dusurup ilk ~30 dk feed'i karartabilirdi. Fix: bugunun kapanisi henuz
+    GELMEDIYSE (`now.time() < close_t`) once bir gun geriye inilir, SONRA
+    hafta sonu/tatil yuvarlamasi yapilir -- boylece "bugunun seansi ACILMIS
+    olsa da HENUZ KAPANMAMIŞSA en son KAPANMIŞ gun" sorgulanir (seans ici
+    -- ornegin Pazartesi 12:00 -- bu fonksiyonun kendisi Cuma dondurur; ama
+    is_stale_bar bu durumda zaten last_trading_day'i HIC cagirmaz, kendi
+    is_market_open dalinda dogrudan "bugun"u kullanir -- bkz. asagisi).
     """
-    d = _to_tr(now).date()
+    current = _to_tr(now)
+    d = current.date()
+    close_t = time(settings.market_close_hour, settings.market_close_minute)
+    if current.time() < close_t:
+        d -= timedelta(days=1)
     effective_holidays = _HOLIDAYS if holidays is None else holidays
     while d.weekday() >= 5 or d.isoformat() in effective_holidays:
         d -= timedelta(days=1)
     return d
 
 
-def is_stale_bar(exchange_time: datetime | None, now: datetime | None = None) -> bool:
-    """Bir veri noktasi (exchange_time/bar_time) beklenen gune ait degilse True.
+def is_stale_bar(bar_or_exchange_time: datetime | None, now: datetime | None = None) -> bool:
+    """Bir veri noktasi (bar_time veya exchange_time) beklenen gune ait
+    degilse True.
+
+    LOW: parametre adi eskiden `exchange_time` idi -- ama caginlar (bkz.
+    aggregator.py/pipeline.py) HIGH-4'ten beri `q.bar_time or q.exchange_time`
+    geciyor; isim yaniltici hale gelmisti. `bar_or_exchange_time` cagirana
+    hangi alanin gelebilecegini acikca soyler.
 
     Provider'lar (orn. Is Yatirim, TradingView) gunluk/bar bazli veri dondurur;
     seans icinde dunku/daha eski bir cubugu "canli fiyat" gibi sunmak yaniltici
-    olur (bkz. H2). exchange_time yoksa bayat SAYILMAZ (baska bir mekanizma --
-    orn. eksik-damga guard'i -- karar verir).
+    olur (bkz. H2). Deger yoksa bayat SAYILMAZ (baska bir mekanizma -- orn.
+    eksik-damga guard'i -- karar verir).
 
     Seans ACIKKEN beklenen gun BUGUNDUR. Seans KAPALIYKEN de bar yasi kontrol
     edilir (MEDIUM-6): beklenen gun SON ISLEM GUNUDUR (hafta sonu/tatil
     dahil) -- aksi halde donmus/eski bir kaynak (orn. 2 hafta oncesi bir bar)
     "kapanis fiyati" gibi gecip alarmsiz kalirdi.
     """
-    if exchange_time is None:
+    if bar_or_exchange_time is None:
         return False
     # LOW-b: Quote.exchange_time/bar_time sozlesmesi UTC'dir. Naive (tzinfo'suz)
     # bir deger gelirse -- beklenmedik ama savunma amacli -- datetime.astimezone()
     # SUNUCUNUN YEREL SISTEM saat dilimini varsayardi; bu, sunucu TZ'sine gore
     # yanlis gun karsilastirmasina yol acabilirdi. Naive girdi HER ZAMAN UTC
     # sayilir (sunucu TZ'sinden bagimsiz).
-    if exchange_time.tzinfo is None:
-        exchange_time = exchange_time.replace(tzinfo=UTC)
-    bar_date = exchange_time.astimezone(TR_TZ).date()
+    if bar_or_exchange_time.tzinfo is None:
+        bar_or_exchange_time = bar_or_exchange_time.replace(tzinfo=UTC)
+    bar_date = bar_or_exchange_time.astimezone(TR_TZ).date()
     expected_day = _to_tr(now).date() if is_market_open(now) else last_trading_day(now)
     return bar_date < expected_day
 
@@ -115,7 +140,10 @@ def market_close_time(day: date) -> datetime:
     """Verilen gunun BIST kapanis anini UTC olarak doner.
 
     Gunluk EOD cubuk dondüren kaynaklarin (orn. Is Yatirim) tek kapanis
-    fiyatini Quote.exchange_time'da ifade edebilmesi icin kullanilir.
+    fiyatini Quote.bar_time'da ifade edebilmesi icin kullanilir (HIGH-4:
+    eskiden Quote.exchange_time'da ifade ediliyordu -- bu kaynak GERCEK bir
+    islem-ani vermedigi icin exchange_time'a tasima terk edildi, bkz.
+    providers/isyatirim.py).
     """
     closing = datetime.combine(day, time(settings.market_close_hour, settings.market_close_minute))
     return closing.replace(tzinfo=TR_TZ).astimezone(UTC)
