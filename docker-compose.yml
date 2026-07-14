@@ -114,7 +114,11 @@ services:
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
-    mem_limit: 128m
+    # v0.54.1'in gercek RSS'i VM130'da ~125MB (128m'e yapisik) -- kernel cgroup
+    # OOM'u ~8 saatte bir sessizce oldurup restart ediyordu (Docker OOMKilled
+    # bunu yanlis-negatif gosteriyor, cunku kernel cgroup kill'i gormuyor).
+    # 256m, izlenen 6 container sabit kaldigi surece 2x headroom verir.
+    mem_limit: 256m
 
 volumes:
   redis-data:
