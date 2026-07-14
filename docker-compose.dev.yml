@@ -2,6 +2,14 @@
 # Kullanim: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 # (docker-compose.override.yml adi kullanilmaz: compose onu sessizce otomatik
 # yukler ve auth'u kapatan bu ayarlar uretim VM'sine sizabilir.)
+#
+# NOT: base docker-compose.yml'deki kaynak limitleri (mem_limit/cpus, prod
+# olcumlerine gore) burada KASITLI olarak gevsetilmedi/kaldirilmadi -- hepsi
+# canli kullanimin (updater ~163MB, api ~138MB) 3-6x uzerinde pay birakiyor,
+# dev makinesinde ek yuk (reload/webhooks) bu payi asmaz. Darlik yasanirsa bu
+# dosyaya servis basina `mem_limit: !reset null` eklenerek limit tamamen
+# kaldirilabilir (dogrulandi: duz `null` ISE YARAMAZ, base degeri korunur --
+# Compose Spec'in `!reset` YAML tag'i gerekir).
 services:
   updater:
     volumes:

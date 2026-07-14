@@ -459,6 +459,65 @@ uçtan uca kilit testleri), ruff + ruff format + mypy temiz.
 
 345 test yeşil (bir önceki turda 343), ruff + ruff format + mypy temiz.
 
+### Düzeltildi (devam 6) — kayıp prod compose overlay'i tek kaynağa konsolide edildi
+- **`cadvisor.mem_limit`** `128m` → `256m` (v0.54.1'in gerçek RSS'i VM130'da
+  ~125MB, önceki tavana yapışıktı; kernel cgroup OOM'u ~8 saatte bir sessizce
+  öldürüp restart ediyordu — Docker `OOMKilled=false` yanlış-negatif verdiği
+  için görünmüyordu).
+- **Zaman bombası bulgusu:** VM130'da (`/opt/bist-canli-api`) repo'da
+  **izlenmeyen** bir `docker-compose.prod.yml` overlay'i tüm prod
+  bellek/CPU limitlerini, log rotation'ı ve panel'in `80:80` publish'ini
+  taşıyordu. 8 Tem'de `redis` bu overlay verilmeden recreate edildi ve `320m`
+  cgroup tavanını kaybederek sınırsız çalışır hale geldi — overlay'e
+  bağımlılığın somut başarısızlık modu.
+- **Fix (bu PR):** tüm limitler `docker-compose.yml`'e taşındı, overlay
+  kaldırıldı (kod dışı, VM130-lokal dosya — deploy adımı ayrı iş paketi):
+  `redis` mem 320m; `api` cpu 1.0/mem 512m; `updater` cpu 1.5/mem 1024m;
+  `bot` cpu 0.5/mem 256m; `panel` mem 64m + ek `80:80` port (mevcut `8080:80`
+  ile birlikte — compose liste alanları `-f` dosyaları arasında birleşir,
+  ikisi de VM130'da fiilen aktifti); tüm servislerde log rotation
+  (`json-file`, `max-size: 10m`, `max-file: 3`). Stil: `deploy.resources.limits`
+  değil üst-seviye `mem_limit`/`cpus` (cadvisor'ün zaten kullandığı stille
+  tutarlı — Swarm'a hiç girilmiyor).
+- **Bulgu (PM kararına bırakıldı, bu PR'da bilinçli konsolide edildi):** `bot`
+  servisinin `restart` politikası overlay'de `unless-stopped` idi; taban
+  tasarım `on-failure` idi (`TELEGRAM_ENABLED=false` iken exit(0)'da durup
+  restart döngüsü oluşturmasın diye). **VM130 için** davranış değişmedi —
+  canlı teşhis: `TELEGRAM_ENABLED=true`, bot `RestartCount=0`, restart-loop
+  yok. **Ama base dosya artık tek kaynak** olduğundan bu, `TELEGRAM_ENABLED=
+  false` olan her ortamı (dev, CI, taze klon) etkiler: bot exit(0) yapar ve
+  `unless-stopped` bunu backoff'lu restart-loop'a sokar. Compose-seviyesinde
+  `profiles: [telegram]` **kullanılmadı** — bu, `docker compose up -d`'nin
+  bot'u sessizce atlamasına yol açar (bayrak unutulursa servis prod'dan
+  kaybolur), tam bu PR'ın yok ettiği hata sınıfı. Kalıcı çözüm uygulama
+  katmanında (devre dışıyken exit yerine idle) — ayrı bir iş.
+- `.gitignore`'a `.api-keys` eklendi (yalnız `.env` kapsanıyordu — bir
+  `git add -A` secret'ı repo'ya sokabilirdi).
+
+345 test yeşil (değişmedi — bu iş yalnız compose/CI-dışı dosyalara dokundu),
+ruff + mypy temiz.
+
+### Düzeltildi (devam 7) — review turu (1 MEDIUM + 1 LOW, deploy öncesi)
+- **MEDIUM-1:** `cadvisor` servisinde log rotation eksikti (`docker compose
+  config` 6 servisten yalnız 5'inde `json-file` gösteriyordu) — devam 6'daki
+  "tüm servislerde log rotation" iddiasıyla çelişiyordu. Üstelik rotation'sız
+  kalan tek container, restart-loop geçmişi olan (~8 saatte bir kernel cgroup
+  OOM) cadvisor'du. Diğer 5 servisle aynı `json-file` / `max-size: 10m` /
+  `max-file: 3` eklendi.
+- **LOW-2:** `.gitignore`'da `.env` yalnız tam-eşleşmeydi — `.env.prod`,
+  `.env.local`, `.env.bak` kapsanmıyordu. `.env*` + `!.env.example` istisnasına
+  genişletildi (`.api-keys` için yazılan aynı gerekçe: `git add -A` secret
+  sızdırabilir).
+- **Kabul edilen risk (MEDIUM-3, bu PR'da düzeltilmedi):** VM130'daki limit
+  toplamı (redis 320 + api 512 + updater 1024 + bot 256 + panel 64 + cadvisor
+  256 = 2432 MiB) gerçek VM RAM'inin (2907 MB, bugün canlı doğrulandı —
+  dokümantasyondaki "6GB" yanlış) ~%84'ü. Limitler cap'tir, reservation değil;
+  fiili toplam kullanım ~460 MB olduğundan bugün risk yok, tek-servis
+  sızıntısı hâlâ kendi cgroup'unda yakalanır (diğer servisleri boğmaz). RAM
+  büyütme veya limit küçültme ayrı bir iş.
+
+345 test yeşil (değişmedi), ruff + mypy temiz.
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi
