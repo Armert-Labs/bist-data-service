@@ -282,3 +282,15 @@ async def test_publish_queue_full_counts_drops():
     with contextlib.suppress(asyncio.CancelledError):
         await first
     await gen.aclose()
+
+
+def test_redis_subscribe_channels_distinguishes_none_from_empty():
+    from app.store import RedisStore
+
+    rs = RedisStore("redis://x", "bist")
+    # None = tum-liste (broadcast kanali)
+    assert rs._subscribe_channels(None) == ["bist:updates"]
+    # dolu filtre = per-sembol kanallar
+    assert rs._subscribe_channels(frozenset({"THYAO"})) == ["bist:updates:THYAO"]
+    # BOS filtre != tum-liste: asla PUBLISH edilmeyen sentinel kanal
+    assert rs._subscribe_channels(frozenset()) == ["bist:updates:__none__"]
