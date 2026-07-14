@@ -82,3 +82,25 @@ def test_stream_requires_key_when_auth_enabled(monkeypatch):
     monkeypatch.setattr(registry, "_entries", [("testkey", "test", False)])
     with TestClient(app) as c:
         assert c.get("/stream").status_code == 401
+
+
+def test_parse_symbols_lenient_splits_valid_invalid():
+    from app.main import _parse_symbols_lenient
+
+    valid, invalid = _parse_symbols_lenient("thyao, garan, toolongsymbol, !!, thyao")
+    assert valid == ["THYAO", "GARAN"]  # normalize + dedup
+    assert invalid == ["TOOLONGSYMBOL", "!!"]  # firlatmaz; ayri liste
+
+
+def test_parse_symbols_lenient_empty_returns_two_empty():
+    from app.main import _parse_symbols_lenient
+
+    assert _parse_symbols_lenient(None) == ([], [])
+    assert _parse_symbols_lenient("") == ([], [])
+
+
+def test_parse_symbols_lenient_truncates_overlong_invalid():
+    from app.main import _parse_symbols_lenient
+
+    _, invalid = _parse_symbols_lenient("A" * 500)
+    assert len(invalid[0]) == 16  # unavailable[] payload sismesin (DoS koruma)

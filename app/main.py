@@ -290,6 +290,52 @@ def _parse_symbols(raw: str | None) -> list[str]:
     return list(dict.fromkeys(parsed))
 
 
+# Gecersiz sembol raporlanirken (unavailable[].symbol) tek bir asiri-uzun
+# token'in payload'i sismesini engeller (gecerli sembol zaten <=6 karakter).
+_MAX_REPORTED_SYMBOL_LEN = 16
+
+
+def _parse_symbols_lenient(raw: str | None) -> tuple[list[str], list[str]]:
+    """`_parse_symbols`'un HATA FIRLATMAYAN varyanti: gecerli ve gecersiz
+    sembolleri AYRI listelerde doner (normalize + dedup, sira korunur).
+
+    /stream bunu kullanir: bicim-gecersiz bir sembol tum baglantiyi 400 ile
+    reddetmek yerine `unavailable[{reason: "invalid_format"}]` olarak
+    raporlanir. /quote ve /quotes eskisi gibi `_parse_symbols` (400 firlatan)
+    kullanmaya devam eder -- bu asimetri bilinclidir."""
+    if not raw:
+        return [], []
+    valid: list[str] = []
+    invalid: list[str] = []
+    for item in raw.split(","):
+        s = sym.normalize(item)
+        if not s:
+            continue
+        if sym.is_valid_symbol(s):
+            valid.append(s)
+        else:
+            invalid.append(s[:_MAX_REPORTED_SYMBOL_LEN])
+    return list(dict.fromkeys(valid)), list(dict.fromkeys(invalid))
+
+
+async def _resolve_quotes(requested: list[str]) -> dict[str, Quote]:
+    """Istenen (bicim-gecerli) sembolleri store'dan getirir; cache'te olmayan
+    ve negative-cache'te OLMAYANLARI on-demand fetch eder (fetch_semaphore +
+    cross_validate=True). Fetch sonrasi hala gelmeyen sembol negative-cache'e
+    eklenir. /quotes ve /stream snapshot'i AYNI yolu paylasir (kopya-mantik yok)."""
+    result = await store.get_quotes(requested)
+    missing = [s for s in requested if s not in result]
+    missing = [s for s in missing if not await store.negative_cache_has(s)]
+    if missing:
+        async with fetch_semaphore:
+            fetched = await fetch_and_commit(store, missing, cross_validate=True)
+            result.update(fetched)
+        for s in missing:
+            if s not in result:
+                await store.negative_cache_add(s)
+    return result
+
+
 def _check_symbol_limit(requested: list[str]) -> None:
     """/quotes ve /validate icin sembol sayisi ust sinirini uygular.
 
@@ -536,16 +582,7 @@ async def get_quotes(
             },
         }
 
-    result = await store.get_quotes(requested)
-    missing = [s for s in requested if s not in result]
-    missing = [s for s in missing if not await store.negative_cache_has(s)]
-    if missing:
-        async with fetch_semaphore:
-            fetched = await fetch_and_commit(store, missing, cross_validate=True)
-            result.update(fetched)
-        for s in missing:
-            if s not in result:
-                await store.negative_cache_add(s)
+    result = await _resolve_quotes(requested)
 
     state = market_state()
     return {
