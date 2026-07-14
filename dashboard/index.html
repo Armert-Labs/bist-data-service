@@ -131,29 +131,15 @@ tr.fl-up   { animation: flup .8s ease; } tr.fl-down { animation: fldown .8s ease
 .spark .px { font-family: var(--mono); font-size: 26px; font-weight: 600; margin: 2px 0 6px; font-variant-numeric: tabular-nums; }
 .spark svg { width: 100%; height: 88px; display: block; }
 .spark .mm { display: flex; justify-content: space-between; color: var(--ink-3); font-family: var(--mono); font-size: 11px; margin-top: 4px; }
-.provs { padding: 12px 16px; display: flex; flex-direction: column; gap: 9px; }
-.prov { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 13px; }
-.prov .pdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
-.prov.ok .pdot { background: var(--up-hi); } .prov.open .pdot { background: var(--down-hi); } .prov.half .pdot { background: var(--armert-hi); }
-.prov .pstate { margin-left: auto; color: var(--ink-3); font-size: 11.5px; letter-spacing: .06em; }
-
-/* Claude denetimi karti — dosya-tabanli, sahte animasyon yok */
-.review { padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 6px; }
-.review .rline { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
-.review .rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); flex: none; }
-.review.ok .rdot { background: var(--up-hi); box-shadow: 0 0 8px rgba(52,211,153,.55); }
-.review.warn .rdot { background: var(--armert-hi); }
-.review.bad .rdot { background: var(--down-hi); }
-.review .rmeta { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
-.review .rsum { font-size: 11.8px; color: var(--ink-2); line-height: 1.45; margin-top: 4px; }
-.rbadge { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; padding: 3px 9px; border-radius: 999px; text-transform: uppercase; background: rgba(148,160,180,.1); color: var(--ink-3); }
-.rbadge.ok { color: var(--up-hi); background: rgba(5,150,105,.14); }
-.rbadge.warn { color: var(--armert-hi); background: rgba(184,119,10,.14); }
-.rbadge.bad { color: var(--down-hi); background: rgba(220,38,38,.14); }
-.rstatus { font-weight: 600; }
-.rstatus.ok { color: var(--up-hi); }
-.rstatus.warn { color: var(--armert-hi); }
-.rstatus.bad { color: var(--down-hi); }
+/* Sistem Durumu karti — /ready (+ /validate) tabanli ozellik-durum listesi */
+.sysstat { padding: 10px 16px 14px; display: flex; flex-direction: column; gap: 8px; }
+.sysrow { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12.5px; }
+.sysrow .sysdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); flex: none; }
+.sysrow.ok .sysdot { background: var(--up-hi); box-shadow: 0 0 8px rgba(52,211,153,.55); }
+.sysrow.warn .sysdot { background: var(--armert-hi); }
+.sysrow.bad .sysdot { background: var(--down-hi); }
+.sysrow .sysname { color: var(--ink); }
+.sysrow .sysdetail { margin-left: auto; color: var(--ink-3); font-size: 11.5px; letter-spacing: .06em; }
 .log { padding: 8px 0; max-height: 240px; overflow-y: auto; }
 .log .ln { display: flex; gap: 10px; padding: 4px 16px; font-family: var(--mono); font-size: 11.8px; color: var(--ink-2); }
 .log .ln .t { color: var(--ink-3); flex: none; }
@@ -228,14 +214,8 @@ a { color: var(--teal-hi); text-decoration: none; }
       <div class="mm"><span id="sp-min"></span><span id="sp-note">tabloda bir sembole tiklayin</span><span id="sp-max"></span></div>
     </div>
     <div class="card">
-      <div class="chead"><h2>Claude Denetimi</h2></div>
-      <div class="review" id="review">
-        <div class="rline"><span class="rdot ok" id="rv-dot"></span><span id="rv-who">denetleyen: Claude Fable 5</span></div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="chead"><h2>Veri Kaynaklari</h2></div>
-      <div class="provs" id="provs"><div class="prov"><span class="pdot"></span>bekleniyor…</div></div>
+      <div class="chead"><h2>Sistem Durumu</h2></div>
+      <div class="sysstat" id="sysstat"><div class="sysrow"><span class="sysdot"></span><span class="sysname">bekleniyor…</span></div></div>
     </div>
     <div class="card">
       <div class="chead"><h2>Olay Akisi</h2></div>
@@ -267,6 +247,8 @@ const state = {
   sseAbort: null,
   backoff: 1000,
   ticks: 0,
+  lastReady: null,
+  lastValidate: null,
 };
 const $ = (id) => document.getElementById(id);
 const fmt = new Intl.NumberFormat("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -320,52 +302,72 @@ async function pollReady() {
     }
     setKpi("market", d.market_open ? "ok" : "", d.market_open ? "ACIK" : "KAPALI");
     setKpi("cache", (d.quotes_cached ?? 0) > 0 ? "ok" : "bad", fmtInt.format(d.quotes_cached ?? 0));
-    renderProviders(d.providers || {});
+    state.lastReady = d;
+    renderSystemStatus();
   } catch (e) {
     setKpi("ready", "bad", "ERISIM YOK", String(e.message || e));
     log("/ready erisilemedi: " + e.message, "err");
   }
 }
-function renderProviders(p) {
-  const box = $("provs");
-  const names = Object.keys(p);
-  if (!names.length) return;
-  const map = { closed: ["ok", "SAGLIKLI"], open: ["open", "DEVRE DISI"], half_open: ["half", "TOPARLANIYOR"] };
-  box.innerHTML = "";
-  for (const n of names) {
-    const [cls, label] = map[p[n]] || ["", p[n]];
-    const el = document.createElement("div");
-    el.className = "prov " + cls;
-    el.innerHTML = '<span class="pdot"></span><span></span><span class="pstate"></span>';
-    el.children[1].textContent = n;
-    el.children[2].textContent = label;
-    box.appendChild(el);
-  }
-}
 async function pollValidate() {
   try {
     const j = await api("/validate?symbols=THYAO,GARAN,AKBNK");
+    state.lastValidate = j;
     if (!j.compared) { setKpi("drift", "warn", "N/A", "referans erisilemedi"); return; }
     const cls = j.consistent ? "ok" : "bad";
     setKpi("drift", cls, "%" + fmt.format(j.max_deviation_pct), "esik %" + j.threshold_pct + (j.consistent ? " — tutarli" : " — TUTARSIZ"));
     if (!j.consistent) log("Kaynaklar arasi sapma esigi asildi: %" + j.max_deviation_pct, "warn");
   } catch (e) { log("/validate hatasi: " + e.message, "err"); }
+  renderSystemStatus();
 }
 async function pollHealth() {
   try { const j = await api("/health"); $("version").textContent = "api v" + j.version; }
   catch { /* /ready zaten alarm verir */ }
 }
 
-/* ---------- Claude denetimi (dosya-tabanli, sahte animasyon yok) ---------- */
-async function loadReviewStatus() {
-  // Yalnizca "denetleyen" adini review-status.json'dan (dosya-tabanli) yazar.
-  try {
-    const r = await fetch("./review-status.json", { cache: "no-store" });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const j = await r.json();
-    $("rv-who").textContent = "denetleyen: " + (j.reviewed_by || "Claude Fable 5");
-  } catch (e) {
-    $("rv-who").textContent = "denetleyen: Claude Fable 5";
+/* ---------- Sistem Durumu (ozellik-durum, /ready + /validate tabanli) ---------- */
+function sysRow(cls, name, detail) {
+  const el = document.createElement("div");
+  el.className = "sysrow" + (cls ? " " + cls : "");
+  el.innerHTML = '<span class="sysdot"></span><span class="sysname"></span><span class="sysdetail"></span>';
+  el.children[1].textContent = name;
+  el.children[2].textContent = detail;
+  return el;
+}
+function renderSystemStatus() {
+  const d = state.lastReady;
+  const box = $("sysstat");
+  if (!box || !d) return;
+  box.innerHTML = "";
+
+  let uCls = "bad", uDetail = "veri yok";
+  if (d.fresh_pct != null) {
+    uCls = d.is_stale ? "bad" : d.fresh_pct >= 90 ? "ok" : d.fresh_pct >= 70 ? "warn" : "bad";
+    uDetail = "%" + fmt.format(d.fresh_pct) + " taze" + (d.is_stale ? " (bayat)" : "");
+  }
+  box.appendChild(sysRow(uCls, "Fiyat guncelleme", uDetail));
+
+  box.appendChild(sysRow(d.store_ok ? "ok" : "bad", "Onbellek", d.store_ok ? fmtInt.format(d.quotes_cached ?? 0) + " sembol" : "erisilemiyor"));
+
+  const provMap = { closed: ["ok", "saglikli"], open: ["bad", "devre disi"], half_open: ["warn", "toparlaniyor"] };
+  for (const [name, pstate] of Object.entries(d.providers || {})) {
+    const [cls, label] = provMap[pstate] || ["", String(pstate)];
+    box.appendChild(sysRow(cls, "Saglayici: " + name, label));
+  }
+
+  const cached = d.quotes_cached ?? 0;
+  const symCls = cached >= 50 ? "ok" : cached > 0 ? "warn" : "bad";
+  box.appendChild(sysRow(symCls, "Sembol evreni", fmtInt.format(cached) + " sembol"));
+
+  box.appendChild(sysRow("", "Piyasa seansi", d.market_open ? "ACIK" : "KAPALI"));
+
+  const v = state.lastValidate;
+  if (v) {
+    if (!v.compared) {
+      box.appendChild(sysRow("", "Capraz-dogrulama", "referans erisilemedi"));
+    } else {
+      box.appendChild(sysRow(v.consistent ? "ok" : "warn", "Capraz-dogrulama", v.consistent ? "tutarli" : "sapma esigi asildi"));
+    }
   }
 }
 
@@ -519,7 +521,6 @@ function restartAll() {
   startSSE();
 }
 restartAll();
-loadReviewStatus();
 </script>
 </body>
 </html>
