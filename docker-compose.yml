@@ -1,3 +1,19 @@
+# Kaynak (mem_limit/cpus) ve log rotation limitleri onceden yalniz VM130'da
+# git-disi bir docker-compose.prod.yml overlay'inde tanimliydi (versiyon
+# kontrolde degildi, tekrarlanamaz/gozden gecirilemezdi). 8 Tem'de redis bu
+# overlay VERILMEDEN recreate edildi ve 320m cgroup tavanini kaybederek
+# sinirsiz calisir hale geldi -- overlay'e bagimliligin somut basarisizlik
+# modu. Tum limitler + log rotation buraya (tek kaynak) tasindi; overlay
+# silindi. `docker compose up` (ikinci -f gerekmez) artik dogru sonucu verir.
+#
+# Stil karari: `deploy.resources.limits` yerine ust-seviye `mem_limit`/`cpus`
+# kullanildi -- (1) dosyadaki tek onceki ornek olan cadvisor zaten bu stili
+# kullaniyordu, iki farkli mekanizma karistirmak okunabilirligi dusurur; (2)
+# `deploy.*` bicimsel olarak Swarm deploy config'idir, Compose V2'nin plain
+# `up` altinda da uyguladigi dogru ama surume/versiyona bagli, daha az bilinen
+# bir davranistir -- bu servis hicbir zaman Swarm modunda calismiyor, ust-
+# seviye alanlar niyeti hem docker compose hem eski docker-compose (v1) icin
+# ayni netlikte ifade eder.
 services:
   redis:
     image: redis:7-alpine
@@ -13,6 +29,18 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    # Uygulama-seviyesi --maxmemory 256mb yukarida Redis'in kendi cap'i --
+    # client buffer/AOF/overhead bunun disinda kalir, bu yuzden cgroup tavani
+    # (320m) ayrica gerekli (canli olcum: RSS ~18MB, tavan cok daha yuksek --
+    # buyume payi).
+    mem_limit: 320m
+    # Log rotation tum servislerde ayni (json-file, rotate edilmezse VM130'un
+    # kok diskini doldurabilir): en fazla 3 x 10MB = 30MB/servis.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   updater:
     build: .
@@ -40,6 +68,16 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # Canli olcum (VM130): ~163MB / 1024MB (%16) -- provider fetch/aggregator
+    # calisirken gecici spike'lara genis pay birakildi (1.5 CPU: batch dongusu
+    # es zamanli fetch icin thread-pool kullanir, tek core'a sikismasin).
+    cpus: 1.5
+    mem_limit: 1024m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   api:
     build: .
@@ -54,13 +92,30 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # Canli olcum (VM130): ~138MB / 512MB (%27) -- stateless, N kopyaya
+    # olceklenebilir oldugundan tek instance icin dar tutuldu.
+    cpus: 1.0
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Telegram bot (REST API istemcisi). TELEGRAM_ENABLED=false varsayilan oldugundan
-  # token verilmezse temiz cikar (exit 0). restart: on-failure -> exit 0'da DURUR
-  # (sonsuz restart dongusu olmaz), yalnizca crash'te yeniden baslar.
+  # token verilmezse temiz cikar (exit 0).
+  # DIKKAT (bulgu, PM karari bekliyor): restart burada `unless-stopped` --
+  # VM130'daki kayip overlay'den geldi ve bu, TELEGRAM_ENABLED=false iken
+  # exit(0) sonrasi da yeniden baslatir (Docker'in backoff'lu restart-loop'u).
+  # Onceki tasarim bilincli olarak `on-failure` kullaniyordu (exit 0'da durur,
+  # yalniz crash'te yeniden baslar) -- ama VM130'da fiilen calisan deger
+  # `unless-stopped` idi (overlay). Bu PR yalniz KONSOLIDE ediyor (tek kaynak
+  # icin fiili prod davranisini degistirmiyor); `on-failure` mu yoksa
+  # `unless-stopped` mi dogru secim oldugu ayri bir karar -- PM/deploy-engineer
+  # onaylamadan degistirilmedi.
   bot:
     build: .
-    restart: on-failure
+    restart: unless-stopped
     command: ["python", "-m", "app.telegram_bot"]
     env_file:
       - path: .env
@@ -73,6 +128,14 @@ services:
     depends_on:
       - api
       - redis
+    # Hafif REST istemcisi -- gozlemlenen crash/kaynak baskisi yok, dar tavan.
+    cpus: 0.5
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Armert x Bisteyes veri kontrol paneli. nginx dashboard'u sunar VE /api'yi
   # api:8000'e reverse-proxy'ler (X-API-Key sunucu-tarafinda eklenir; ayni-origin).
@@ -85,10 +148,22 @@ services:
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro
       - ./deploy/panel/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    # 8080:80 base'in orijinal mapping'i (cadvisor cakismasini onlemek icin
+    # secilmisti, bkz. cadvisor notu). 80:80 kayip overlay'den geliyordu --
+    # ikisi de VM130'da fiilen aktifti (compose liste-tipi alanlari birden
+    # fazla -f arasinda BIRLESTIRIR, degistirmez); ikisi de korunuyor.
     ports:
       - "8080:80"
+      - "80:80"
     depends_on:
       - api
+    # nginx statik + reverse-proxy -- hafif, dar tavan.
+    mem_limit: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # cAdvisor: VM140 Prometheus'un container-bazi bellek/CPU/OOM metriklerini
   # scrape edebilmesi icin. NOT: host port 8080 zaten yukaridaki 'panel'

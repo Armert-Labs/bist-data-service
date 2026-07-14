@@ -459,6 +459,38 @@ uçtan uca kilit testleri), ruff + ruff format + mypy temiz.
 
 345 test yeşil (bir önceki turda 343), ruff + ruff format + mypy temiz.
 
+### Düzeltildi (devam 6) — kayıp prod compose overlay'i tek kaynağa konsolide edildi
+- **`cadvisor.mem_limit`** `128m` → `256m` (v0.54.1'in gerçek RSS'i VM130'da
+  ~125MB, önceki tavana yapışıktı; kernel cgroup OOM'u ~8 saatte bir sessizce
+  öldürüp restart ediyordu — Docker `OOMKilled=false` yanlış-negatif verdiği
+  için görünmüyordu).
+- **Zaman bombası bulgusu:** VM130'da (`/opt/bist-canli-api`) repo'da
+  **izlenmeyen** bir `docker-compose.prod.yml` overlay'i tüm prod
+  bellek/CPU limitlerini, log rotation'ı ve panel'in `80:80` publish'ini
+  taşıyordu. 8 Tem'de `redis` bu overlay verilmeden recreate edildi ve `320m`
+  cgroup tavanını kaybederek sınırsız çalışır hale geldi — overlay'e
+  bağımlılığın somut başarısızlık modu.
+- **Fix (bu PR):** tüm limitler `docker-compose.yml`'e taşındı, overlay
+  kaldırıldı (kod dışı, VM130-lokal dosya — deploy adımı ayrı iş paketi):
+  `redis` mem 320m; `api` cpu 1.0/mem 512m; `updater` cpu 1.5/mem 1024m;
+  `bot` cpu 0.5/mem 256m; `panel` mem 64m + ek `80:80` port (mevcut `8080:80`
+  ile birlikte — compose liste alanları `-f` dosyaları arasında birleşir,
+  ikisi de VM130'da fiilen aktifti); tüm servislerde log rotation
+  (`json-file`, `max-size: 10m`, `max-file: 3`). Stil: `deploy.resources.limits`
+  değil üst-seviye `mem_limit`/`cpus` (cadvisor'ün zaten kullandığı stille
+  tutarlı — Swarm'a hiç girilmiyor).
+- **Bulgu (PM kararı bekliyor, bu PR'da değiştirilmedi):** `bot` servisinin
+  `restart` politikası overlay'de `unless-stopped` idi; taban tasarım
+  `on-failure` idi (`TELEGRAM_ENABLED=false` iken exit(0)'da durup restart
+  döngüsü oluşturmasın diye). VM130'da fiilen çalışan değer `unless-stopped`
+  olduğundan (overlay) bu PR yalnız konsolide etti, davranışı **değiştirmedi**
+  — `on-failure` mı doğru yoksa `unless-stopped` mı kalmalı ayrı bir karar.
+- `.gitignore`'a `.api-keys` eklendi (yalnız `.env` kapsanıyordu — bir
+  `git add -A` secret'ı repo'ya sokabilirdi).
+
+345 test yeşil (değişmedi — bu iş yalnız compose/CI-dışı dosyalara dokundu),
+ruff + mypy temiz.
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi

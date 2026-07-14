@@ -13,6 +13,7 @@ env/
 
 # Ortam degiskenleri
 .env
+.api-keys
 
 # Compose'un otomatik yukledigi lokal override (auth kapatabilir — commit etme;
 # gelistirme icin docker-compose.dev.yml kullanin)
