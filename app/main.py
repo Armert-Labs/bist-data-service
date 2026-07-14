@@ -852,9 +852,7 @@ async def stream(
     # ping birimi SANIYEDIR (sse-starlette): 15 sn'de bir keep-alive yorumu
     # gonderilir; market kapaliyken (veri akmazken) proxy idle-timeout'larinin
     # baglantiyi koparmasini onler. (Onceki deger 15000 idi = ~4 saat.)
-    return EventSourceResponse(
-        _stream_generator(request, symbol_filter, tuple(invalid)), ping=15
-    )
+    return EventSourceResponse(_stream_generator(request, symbol_filter, tuple(invalid)), ping=15)
 
 
 @app.get("/demo", response_class=HTMLResponse, tags=["Sistem"], summary="Canli test sayfasi")
