@@ -243,3 +243,41 @@ def test_stream_over_symbol_limit_rejected(override_settings):
     with TestClient(app) as c:
         r = c.get("/stream?symbols=THYAO,GARAN,ASELS")
         assert r.status_code == 400
+
+
+def test_stream_over_symbol_limit_counts_invalid_too(override_settings):
+    """MED-2 regresyon-kilidi: _check_symbol_limit(valid + invalid) -- toplam
+    limite sayilir. Yalnizca THYAO gecerli (1 adet, limitin altinda); iki
+    gecersiz sembol EKLENINCE toplam (3) limiti (2) asar. `valid + invalid`
+    yerine yanlislikla `valid` sayilsaydi bu istek 400 DONMEZDI (DoS tavani
+    gecersiz-sembol-doldurarak bypass edilebilirdi)."""
+    override_settings(max_symbols_per_request=2)
+    with TestClient(app) as c:
+        r = c.get("/stream?symbols=THYAO,TOOLONGSYMBOL1,TOOLONGSYMBOL2")
+        assert r.status_code == 400
+
+
+def test_stream_all_invalid_uses_empty_frozenset_not_none(monkeypatch):
+    """MED-1 regresyon-kilidi: WP2 prod-taşma fix'inin HTTP-katmani lincpini.
+    `/stream?symbols=<hepsi format-gecersiz>` icin `symbol_filter`, None DEGIL,
+    BOS frozenset olmali -- aksi halde RedisStore.subscribe(None) tum-piyasaya
+    abone olur (WP2'nin kapattigi prod-bug geri doner). Gercek `_stream_generator`
+    yerine argumanlari yakalayan sahte bir generator ile `stream()`'in gercek
+    HTTP-katmani (Query -> _parse_symbols_lenient -> symbol_filter atamasi)
+    ucdan uca yurutulur (mevcut testler yalniz 400/401/503 hata-yollarinda
+    duruyordu, bu satirlar hic calismiyordu)."""
+    captured: dict = {}
+
+    async def fake_stream_generator(request, symbol_filter, invalid_symbols=()):
+        captured["symbol_filter"] = symbol_filter
+        captured["invalid_symbols"] = invalid_symbols
+        return
+        yield  # asla calismaz -- bu fonksiyonu async generator yapmak icin sart
+
+    monkeypatch.setattr("app.main._stream_generator", fake_stream_generator)
+    with TestClient(app) as c:
+        r = c.get("/stream?symbols=TOOLONGSYMBOL")
+        assert r.status_code == 200
+    assert captured["symbol_filter"] == frozenset()
+    assert captured["symbol_filter"] is not None
+    assert captured["invalid_symbols"] == ("TOOLONGSYMBOL",)
