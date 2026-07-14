@@ -619,6 +619,29 @@ data: {"market":"CLOSED","quotes":{"THYAO":{...Quote},"GARAN":{...Quote}}}
 
 > `: ` ile başlayan satır SSE yorum satırıdır (keep-alive); istemci yok sayar.
 
+**`unavailable[]` (yalnız ilk snapshot, filtrelenmiş bağlantıda):** `symbols=` ile
+istenen semboller arasında karşılanamayanlar varsa, ilk `event: quotes` payload'ına
+`unavailable: [{symbol, reason}]` alanı eklenir. `reason` üç değerden biridir:
+
+| `reason` | Anlamı |
+| --- | --- |
+| `invalid_format` | Sembol BIST biçimini (`^[A-Z0-9]{2,6}$`) geçmiyor. |
+| `negative_cache` | Bilinen-getirilemeyen sembol (muhtemelen delisted). |
+| `fetch_failed` | On-demand fetch denendi ama veri gelmedi (biçim geçerli). |
+
+Örnek (THYAO mevcut, XXXX delisted):
+
+```json
+{"market": "OPEN",
+ "quotes": {"THYAO": {"price": 334.0, "...": "..."}},
+ "unavailable": [{"symbol": "XXXX", "reason": "negative_cache"}]}
+```
+
+Sonraki (pub/sub) update olayları `unavailable` alanını **taşımaz** — yalnız ilk
+snapshot bunu raporlar. `symbols` verilmezse (tüm-liste modu) veya istenen tüm
+semboller karşılanırsa `unavailable` alanı hiç bulunmaz (geriye uyumlu: eski
+tüketiciler kırılmaz).
+
 #### (a) Tarayıcı — `EventSource`
 
 ```html
@@ -833,6 +856,10 @@ Quote nesnesindeki alanlar (`/quote`, `/quotes`, `/all`, `/stream` içinde aynı
 
 Zarf (envelope) düzeyi alanlar (`/all`, `/quotes`, `/stream`): `market`, `count`,
 `last_update`, `is_stale` (veri bayat mı), `delayed`, ve `/quotes`'ta `missing`.
+`/stream` ilk snapshot'ına özel: `unavailable` — `symbols=` ile istenip karşılanamayan
+sembolleri `{symbol, reason}` biçiminde listeler (`reason`: `invalid_format` |
+`negative_cache` | `fetch_failed`); yalnız karşılanamayan sembol varsa bulunur,
+sonraki update olaylarında taşınmaz (bkz. [SSE bölümü](#-sse--canlı-akış)).
 
 > **Gecikme & seans:** Veri **~15 dk gecikmelidir** (`delayed: true`). BIST seansı
 > **10:00–18:15** (Europe/Istanbul, UTC+3). Piyasa kapalıyken (`market_state: "CLOSED"`)
