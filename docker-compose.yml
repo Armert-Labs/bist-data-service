@@ -104,15 +104,18 @@ services:
 
   # Telegram bot (REST API istemcisi). TELEGRAM_ENABLED=false varsayilan oldugundan
   # token verilmezse temiz cikar (exit 0).
-  # DIKKAT (bulgu, PM karari bekliyor): restart burada `unless-stopped` --
-  # VM130'daki kayip overlay'den geldi ve bu, TELEGRAM_ENABLED=false iken
-  # exit(0) sonrasi da yeniden baslatir (Docker'in backoff'lu restart-loop'u).
-  # Onceki tasarim bilincli olarak `on-failure` kullaniyordu (exit 0'da durur,
-  # yalniz crash'te yeniden baslar) -- ama VM130'da fiilen calisan deger
-  # `unless-stopped` idi (overlay). Bu PR yalniz KONSOLIDE ediyor (tek kaynak
-  # icin fiili prod davranisini degistirmiyor); `on-failure` mu yoksa
-  # `unless-stopped` mi dogru secim oldugu ayri bir karar -- PM/deploy-engineer
-  # onaylamadan degistirilmedi.
+  # restart: unless-stopped -- VM130'daki kayip overlay'den konsolide edildi;
+  # VM130'da TELEGRAM_ENABLED=true (canli teshis: bot RestartCount=0, restart-
+  # loop YOK), bu yuzden VM130 icin davranis DEGISMEDI. AMA base dosya artik
+  # tek kaynak: TELEGRAM_ENABLED=false olan her ortamda (dev, CI, taze klon)
+  # bot exit(0) yapar ve `unless-stopped` bunu Docker'in backoff'lu restart-
+  # loop'uyla yeniden baslatir -- eski `on-failure` (exit 0'da durur, yalniz
+  # crash'te yeniden baslar) bu riski tasimiyordu. Kalici cozum uygulama
+  # katmaninda (devre disiyken exit yerine idle kalmak) -- ayri bir is olarak
+  # acilmali; compose-seviyesinde `profiles: [telegram]` KULLANILMADI, cunku
+  # bu, `docker compose up -d`'nin bot'u SESSIZCE atlamasina yol acar (`--profile
+  # telegram` unutulursa servis prod'dan kaybolur) -- tam bu PR'in yok ettigi
+  # hata sinifi.
   bot:
     build: .
     restart: unless-stopped
@@ -194,6 +197,14 @@ services:
     # bunu yanlis-negatif gosteriyor, cunku kernel cgroup kill'i gormuyor).
     # 256m, izlenen 6 container sabit kaldigi surece 2x headroom verir.
     mem_limit: 256m
+    # cadvisor, restart-loop gecmisi olan (~8 saatte bir OOM) TEK container --
+    # rotation'siz kalirsa her restart log biriktirir, kok diski sessizce
+    # dolabilir. Diger 5 servisle ayni tavan.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   redis-data:

@@ -11,8 +11,10 @@ dist/
 venv/
 env/
 
-# Ortam degiskenleri
-.env
+# Ortam degiskenleri (.env.prod / .env.local / .env.bak vb. de kapsanir --
+# tam-eslesme birakilirsa `git add -A` bunlari repo'ya sokabilir)
+.env*
+!.env.example
 .api-keys
 
 # Compose'un otomatik yukledigi lokal override (auth kapatabilir — commit etme;
