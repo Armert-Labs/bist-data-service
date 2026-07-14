@@ -104,3 +104,142 @@ def test_parse_symbols_lenient_truncates_overlong_invalid():
 
     _, invalid = _parse_symbols_lenient("A" * 500)
     assert len(invalid[0]) == 16  # unavailable[] payload sismesin (DoS koruma)
+
+
+async def test_stream_snapshot_mixed_available_and_delisted():
+    """(a) karisik: available quotes dogru + delisted negative_cache reason'i."""
+    from app.main import _stream_generator, store
+
+    _seed_store()  # THYAO, GARAN cached
+    await store.negative_cache_add("DELIS")
+    gen = _stream_generator(_StubRequest(), frozenset({"THYAO", "DELIS"}), ())
+    event = await asyncio.wait_for(gen.__anext__(), timeout=2)
+    payload = json.loads(event["data"])
+    assert payload["quotes"]["THYAO"]["price"] == 334.0
+    assert "DELIS" not in payload["quotes"]
+    assert {"symbol": "DELIS", "reason": "negative_cache"} in payload["unavailable"]
+    await gen.aclose()
+
+
+async def test_stream_snapshot_all_negative_cache_still_emits():
+    """(b) hepsi unavailable (negative_cache): quotes bos AMA snapshot YINE yayinlanir."""
+    from app.main import _stream_generator, store
+
+    _seed_store()
+    await store.negative_cache_add("AAAA")
+    await store.negative_cache_add("BBBB")
+    gen = _stream_generator(_StubRequest(), frozenset({"AAAA", "BBBB"}), ())
+    event = await asyncio.wait_for(gen.__anext__(), timeout=2)
+    payload = json.loads(event["data"])
+    assert payload["quotes"] == {}  # bos
+    reasons = {u["symbol"]: u["reason"] for u in payload["unavailable"]}
+    assert reasons == {"AAAA": "negative_cache", "BBBB": "negative_cache"}
+    await gen.aclose()
+
+
+async def test_stream_snapshot_all_invalid_format_still_emits():
+    """(b') hepsi unavailable (invalid_format): symbol_filter bos, invalid dolu."""
+    from app.main import _stream_generator
+
+    _seed_store()
+    gen = _stream_generator(_StubRequest(), frozenset(), ("TOOLONGX", "XX!!"))
+    event = await asyncio.wait_for(gen.__anext__(), timeout=2)
+    payload = json.loads(event["data"])
+    assert payload["quotes"] == {}
+    reasons = {u["symbol"]: u["reason"] for u in payload["unavailable"]}
+    assert reasons == {"TOOLONGX": "invalid_format", "XX!!": "invalid_format"}
+    await gen.aclose()
+
+
+async def test_stream_snapshot_ondemand_fetch_for_uncached(monkeypatch):
+    """(c) cache-disi gecerli sembol -> on-demand fetch tetiklenir, snapshot'a girer."""
+    from app.main import _stream_generator
+    from app.models import Quote
+
+    _seed_store()
+    calls = []
+
+    async def fake_fetch(store_arg, symbols, **kw):
+        calls.append(list(symbols))
+        return {"KCHOL": Quote(symbol="KCHOL", price=42.0)}
+
+    monkeypatch.setattr("app.main.fetch_and_commit", fake_fetch)
+    gen = _stream_generator(_StubRequest(), frozenset({"KCHOL"}), ())
+    event = await asyncio.wait_for(gen.__anext__(), timeout=2)
+    payload = json.loads(event["data"])
+    assert calls == [["KCHOL"]]  # fetch tetiklendi
+    assert payload["quotes"]["KCHOL"]["price"] == 42.0
+    assert "unavailable" not in payload  # hepsi karsilandi -> alan YOK
+    await gen.aclose()
+
+
+async def test_stream_snapshot_fetch_failed_reason(monkeypatch):
+    """(c') on-demand fetch veri getirmezse -> fetch_failed reason."""
+    from app.main import _stream_generator
+
+    _seed_store()
+
+    async def fake_fetch(store_arg, symbols, **kw):
+        return {}  # veri gelmedi
+
+    monkeypatch.setattr("app.main.fetch_and_commit", fake_fetch)
+    gen = _stream_generator(_StubRequest(), frozenset({"NEWCO"}), ())
+    event = await asyncio.wait_for(gen.__anext__(), timeout=2)
+    payload = json.loads(event["data"])
+    assert {"symbol": "NEWCO", "reason": "fetch_failed"} in payload["unavailable"]
+    await gen.aclose()
+
+
+async def test_stream_snapshot_invalid_format_skips_fetch(monkeypatch):
+    """(d) invalid_format sembol fetch DENENMEDEN raporlanir."""
+    from app.main import _stream_generator
+
+    _seed_store()
+    called = False
+
+    async def fake_fetch(*a, **k):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("app.main.fetch_and_commit", fake_fetch)
+    gen = _stream_generator(_StubRequest(), frozenset({"THYAO"}), ("TOOLONGX",))
+    event = await asyncio.wait_for(gen.__anext__(), timeout=2)
+    payload = json.loads(event["data"])
+    assert payload["quotes"]["THYAO"]["price"] == 334.0
+    assert {"symbol": "TOOLONGX", "reason": "invalid_format"} in payload["unavailable"]
+    assert called is False  # invalid icin fetch yok
+    await gen.aclose()
+
+
+async def test_stream_snapshot_no_unavailable_key_when_all_available():
+    """(e) unavailable bos -> payload ESKISIYLE BIREBIR (unavailable ANAHTARI YOK)."""
+    from app.main import _stream_generator
+
+    _seed_store()
+    gen = _stream_generator(_StubRequest(), frozenset({"THYAO"}), ())
+    event = await asyncio.wait_for(gen.__anext__(), timeout=2)
+    payload = json.loads(event["data"])
+    assert set(payload.keys()) == {"market", "quotes"}  # birebir eski sema
+    await gen.aclose()
+
+
+async def test_stream_snapshot_full_list_unchanged():
+    """(e') symbols parametresi yok (tum-liste) -> eski davranis, unavailable yok."""
+    from app.main import _stream_generator
+
+    _seed_store()
+    gen = _stream_generator(_StubRequest(), None, ())
+    event = await asyncio.wait_for(gen.__anext__(), timeout=2)
+    payload = json.loads(event["data"])
+    assert set(payload.keys()) == {"market", "quotes"}
+    assert set(payload["quotes"]) == {"THYAO", "GARAN"}
+    await gen.aclose()
+
+
+def test_stream_over_symbol_limit_rejected(override_settings):
+    """on-demand DoS tavani: gecerli+gecersiz toplami MAX_SYMBOLS_PER_REQUEST asarsa 400."""
+    override_settings(max_symbols_per_request=2)
+    with TestClient(app) as c:
+        r = c.get("/stream?symbols=THYAO,GARAN,ASELS")
+        assert r.status_code == 400
