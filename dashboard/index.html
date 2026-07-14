@@ -349,12 +349,6 @@ function renderSystemStatus() {
 
   box.appendChild(sysRow(d.store_ok ? "ok" : "bad", "Onbellek", d.store_ok ? fmtInt.format(d.quotes_cached ?? 0) + " sembol" : "erisilemiyor"));
 
-  const provMap = { closed: ["ok", "saglikli"], open: ["bad", "devre disi"], half_open: ["warn", "toparlaniyor"] };
-  for (const [name, pstate] of Object.entries(d.providers || {})) {
-    const [cls, label] = provMap[pstate] || ["", String(pstate)];
-    box.appendChild(sysRow(cls, "Saglayici: " + name, label));
-  }
-
   const cached = d.quotes_cached ?? 0;
   const symCls = cached >= 50 ? "ok" : cached > 0 ? "warn" : "bad";
   box.appendChild(sysRow(symCls, "Sembol evreni", fmtInt.format(cached) + " sembol"));
