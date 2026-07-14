@@ -373,6 +373,20 @@ class RedisStore(Store):
     def _symbol_channel(self, symbol: str) -> str:
         return f"{self._prefix}:updates:{symbol.upper()}"
 
+    def _subscribe_channels(self, symbols: frozenset[str] | None) -> list[str]:
+        """Abone olunacak Redis kanallarini secer.
+
+        symbols is None  -> tum-liste (broadcast kanali).
+        symbols dolu     -> per-sembol kanallar.
+        symbols BOS set  -> istenen tum sembollerin gecersiz/karsilanamaz oldugu
+                            durum: asla PUBLISH edilmeyen sentinel kanal. Boylece
+                            istemci baglantisi acik kalir (keep-alive) ama
+                            tum-piyasa akisini ALMAZ (eski `if symbols:` bunu
+                            yanlislikla tum-liste sayiyordu)."""
+        if symbols is None:
+            return [self._channel]
+        return [self._symbol_channel(s) for s in symbols] or [f"{self._prefix}:updates:__none__"]
+
     async def connect(self) -> None:
         import redis.asyncio as aioredis
 
@@ -493,11 +507,7 @@ class RedisStore(Store):
 
     async def subscribe(self, symbols: frozenset[str] | None = None) -> AsyncIterator[list[Quote]]:
         pubsub = self._redis.pubsub()
-        if symbols:
-            channels = [self._symbol_channel(s) for s in symbols]
-            await pubsub.subscribe(*channels)
-        else:
-            await pubsub.subscribe(self._channel)
+        await pubsub.subscribe(*self._subscribe_channels(symbols))
         try:
             async for message in pubsub.listen():
                 if message.get("type") != "message":

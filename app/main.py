@@ -45,7 +45,7 @@ from .config import settings, validate_production
 from .deps import fetch_semaphore, limiter, require_api_key
 from .logging_config import set_request_id, setup_logging
 from .market import is_market_open, is_stale_bar, market_state
-from .models import HistoryResponse, Quote
+from .models import HistoryResponse, Quote, UnavailableSymbol
 from .pipeline import (
     compare_against_references,
     fetch_and_commit,
@@ -288,6 +288,52 @@ def _parse_symbols(raw: str | None) -> list[str]:
             raise HTTPException(status_code=400, detail=f"Gecersiz sembol: {item!r}")
         parsed.append(s)
     return list(dict.fromkeys(parsed))
+
+
+# Gecersiz sembol raporlanirken (unavailable[].symbol) tek bir asiri-uzun
+# token'in payload'i sismesini engeller (gecerli sembol zaten <=6 karakter).
+_MAX_REPORTED_SYMBOL_LEN = 16
+
+
+def _parse_symbols_lenient(raw: str | None) -> tuple[list[str], list[str]]:
+    """`_parse_symbols`'un HATA FIRLATMAYAN varyanti: gecerli ve gecersiz
+    sembolleri AYRI listelerde doner (normalize + dedup, sira korunur).
+
+    /stream bunu kullanir: bicim-gecersiz bir sembol tum baglantiyi 400 ile
+    reddetmek yerine `unavailable[{reason: "invalid_format"}]` olarak
+    raporlanir. /quote ve /quotes eskisi gibi `_parse_symbols` (400 firlatan)
+    kullanmaya devam eder -- bu asimetri bilinclidir."""
+    if not raw:
+        return [], []
+    valid: list[str] = []
+    invalid: list[str] = []
+    for item in raw.split(","):
+        s = sym.normalize(item)
+        if not s:
+            continue
+        if sym.is_valid_symbol(s):
+            valid.append(s)
+        else:
+            invalid.append(s[:_MAX_REPORTED_SYMBOL_LEN])
+    return list(dict.fromkeys(valid)), list(dict.fromkeys(invalid))
+
+
+async def _resolve_quotes(requested: list[str]) -> dict[str, Quote]:
+    """Istenen (bicim-gecerli) sembolleri store'dan getirir; cache'te olmayan
+    ve negative-cache'te OLMAYANLARI on-demand fetch eder (fetch_semaphore +
+    cross_validate=True). Fetch sonrasi hala gelmeyen sembol negative-cache'e
+    eklenir. /quotes ve /stream snapshot'i AYNI yolu paylasir (kopya-mantik yok)."""
+    result = await store.get_quotes(requested)
+    missing = [s for s in requested if s not in result]
+    missing = [s for s in missing if not await store.negative_cache_has(s)]
+    if missing:
+        async with fetch_semaphore:
+            fetched = await fetch_and_commit(store, missing, cross_validate=True)
+            result.update(fetched)
+        for s in missing:
+            if s not in result:
+                await store.negative_cache_add(s)
+    return result
 
 
 def _check_symbol_limit(requested: list[str]) -> None:
@@ -536,16 +582,7 @@ async def get_quotes(
             },
         }
 
-    result = await store.get_quotes(requested)
-    missing = [s for s in requested if s not in result]
-    missing = [s for s in missing if not await store.negative_cache_has(s)]
-    if missing:
-        async with fetch_semaphore:
-            fetched = await fetch_and_commit(store, missing, cross_validate=True)
-            result.update(fetched)
-        for s in missing:
-            if s not in result:
-                await store.negative_cache_add(s)
+    result = await _resolve_quotes(requested)
 
     state = market_state()
     return {
@@ -710,23 +747,61 @@ async def validate(
     }
 
 
-async def _stream_generator(request: Request, symbol_filter: frozenset[str] | None):
-    """SSE olay ureticisi: once tam snapshot, sonra pub/sub akisi.
+async def _stream_generator(
+    request: Request,
+    symbol_filter: frozenset[str] | None,
+    invalid_symbols: tuple[str, ...] = (),
+):
+    """SSE olay ureticisi: once tam snapshot (istege gore unavailable[]),
+    sonra pub/sub akisi.
 
     Modul seviyesinde: TestClient uzerinden test edilemiyor (subscribe'da
     bloklanan generator kapanista iptal edilemiyor); dogrudan test edilir.
-    """
+
+    `symbol_filter is None` -> tum-liste modu (symbols parametresi yok); eski
+    davranis birebir korunur, unavailable[] URETILMEZ. Aksi halde on-demand
+    mod: istenen semboller cozulur, karsilanamayanlar `unavailable[]` ile
+    raporlanir. `invalid_symbols` yalnizca on-demand modda anlamlidir."""
     global _sse_clients
     _sse_clients += 1
     metrics.SSE_CLIENTS.set(_sse_clients)
     try:
         state = market_state()
-        initial = await store.get_all()
-        snapshot = _sse_quotes_payload(list(initial.values()), symbol_filter, state)
-        if snapshot:
+        unavailable: list[dict] = []
+
+        if symbol_filter is None:
+            # Tum-liste modu: degismedi.
+            initial = await store.get_all()
+            snapshot = _sse_quotes_payload(list(initial.values()), symbol_filter, state)
+        else:
+            # On-demand modu: istenen (bicim-gecerli) sembolleri coz.
+            valid = list(symbol_filter)
+            # negative-cache uyeligini FETCH'ten ONCE yakala (reason ayrimi icin).
+            neg_before = {s for s in valid if await store.negative_cache_has(s)}
+            result = await _resolve_quotes(valid)
+            snapshot = _sse_quotes_payload(list(result.values()), symbol_filter, state)
+            # Oncelik sirasiyla: invalid_format > negative_cache > fetch_failed.
+            for s in invalid_symbols:
+                unavailable.append(
+                    UnavailableSymbol(symbol=s, reason="invalid_format").model_dump()
+                )
+            for s in valid:
+                if s in result:
+                    continue
+                reason = "negative_cache" if s in neg_before else "fetch_failed"
+                unavailable.append(UnavailableSymbol(symbol=s, reason=reason).model_dump())
+
+        # Guard fix: quotes bos OLSA bile unavailable varsa ILK event yayinlanir
+        # (istenen sembollerin HEPSI karsilanamazsa consumer haber alsin).
+        if snapshot or unavailable:
+            payload: dict[str, Any] = {"market": state, "quotes": snapshot}
+            # unavailable ANAHTARI yalniz non-empty ise eklenir -> unavailable
+            # bos oldugunda payload eski sema ile BIREBIR (geriye uyum).
+            if unavailable:
+                payload["unavailable"] = unavailable
             yield {
                 "event": "quotes",
-                "data": json.dumps({"market": state, "quotes": snapshot}, default=str),
+                "data": json.dumps(payload, default=str),
             }
 
         async for quotes in store.subscribe(symbol_filter):
@@ -748,6 +823,14 @@ async def _stream_generator(request: Request, symbol_filter: frozenset[str] | No
     "/stream",
     tags=["Akis"],
     summary="SSE canli fiyat akisi",
+    description=(
+        "SSE (text/event-stream) canli fiyat akisi. Baglaninca ILK `event: quotes` "
+        "payload'i tam snapshot'tir. `symbols=` ile filtrelenmis baglantida, "
+        "karsilanamayan semboller ilk snapshot'a `unavailable: [{symbol, reason}]` "
+        "olarak eklenir (reason: invalid_format | negative_cache | fetch_failed). "
+        "Sonraki update event'leri bu alani TASIMAZ. `symbols` verilmezse (tum-liste) "
+        "veya hepsi karsilanirsa `unavailable` alani hic bulunmaz (geriye uyumlu)."
+    ),
     dependencies=[Depends(require_api_key)],
 )
 async def stream(
@@ -757,13 +840,19 @@ async def stream(
     if _sse_clients >= settings.max_sse_clients:
         raise HTTPException(status_code=503, detail="SSE baglanti limiti dolu.")
 
-    requested = set(_parse_symbols(symbols))
-    symbol_filter = frozenset(requested) if requested else None
+    valid, invalid = _parse_symbols_lenient(symbols)
+    # on-demand fetch DoS yuzeyini + unavailable[] boyutunu sinirla: gecerli +
+    # gecersiz toplami /quotes ile ayni tavana tabi.
+    _check_symbol_limit(valid + invalid)
+
+    # symbols parametresi VARSA filtre daima set olur (bos olabilir: hepsi
+    # gecersiz); None yalniz parametre HIC verilmediginde (tum-liste modu).
+    symbol_filter = frozenset(valid) if symbols else None
 
     # ping birimi SANIYEDIR (sse-starlette): 15 sn'de bir keep-alive yorumu
     # gonderilir; market kapaliyken (veri akmazken) proxy idle-timeout'larinin
     # baglantiyi koparmasini onler. (Onceki deger 15000 idi = ~4 saat.)
-    return EventSourceResponse(_stream_generator(request, symbol_filter), ping=15)
+    return EventSourceResponse(_stream_generator(request, symbol_filter, tuple(invalid)), ping=15)
 
 
 @app.get("/demo", response_class=HTMLResponse, tags=["Sistem"], summary="Canli test sayfasi")

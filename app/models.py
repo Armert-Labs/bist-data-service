@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -108,3 +109,18 @@ class HealthResponse(BaseModel):
     last_update: datetime | None = None
     market_open: bool
     update_interval: float
+
+
+UnavailableReason = Literal["invalid_format", "negative_cache", "fetch_failed"]
+
+
+class UnavailableSymbol(BaseModel):
+    """SSE /stream ILK snapshot'inda karsilanamayan sembol + neden.
+
+    reason onceligi: invalid_format > negative_cache > fetch_failed.
+    - invalid_format : bicim regex'ini (^[A-Z0-9]{2,6}$) gecmiyor.
+    - negative_cache : bilinen-getirilemeyen (delisted olasi).
+    - fetch_failed   : on-demand fetch denendi, veri gelmedi (invalid degil)."""
+
+    symbol: str
+    reason: UnavailableReason

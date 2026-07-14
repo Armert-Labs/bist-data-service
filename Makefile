@@ -9,8 +9,9 @@ install: ## Bagimliliklari + pre-commit kur
 	pip install -e ".[dev]"
 	pre-commit install
 
-lint: ## Ruff ile lint
+lint: ## Ruff ile lint (check + format --check, CI ile birebir)
 	ruff check .
+	ruff format --check .
 
 format: ## Ruff ile formatla
 	ruff format .
