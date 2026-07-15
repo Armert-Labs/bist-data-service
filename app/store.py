@@ -18,6 +18,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from . import metrics
 from .config import settings
@@ -28,6 +29,25 @@ logger = logging.getLogger(__name__)
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _mask_redis_url(url: str) -> str:
+    """HIGH-2 (PR#19 review): baglanti loglarinda parola ASLA gorunmesin --
+    yalniz `redis://host:port/db` (kimlik bilgisi varsa `***@` ile maskeli)
+    kalir. Onceden `self._url` oldugu gibi loglaniyordu, parola api/updater
+    stdout/json-file log'una duz metin dusuyordu."""
+    try:
+        parsed = urlsplit(url)
+        netloc = parsed.hostname or ""
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+        if parsed.username or parsed.password:
+            netloc = f"***@{netloc}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    except ValueError:
+        # Ayristirilamayan (bozuk userinfo/port) URL -- yine de parola
+        # sizdirmadan tamamen maskele (fail-safe).
+        return "***"
 
 
 def _real_data_age_seconds(q: Quote, now: datetime) -> float | None:
@@ -398,7 +418,7 @@ class RedisStore(Store):
             health_check_interval=30,
         )
         await self._redis.ping()
-        logger.info("RedisStore baglandi: %s", self._url)
+        logger.info("RedisStore baglandi: %s", _mask_redis_url(self._url))
 
     async def close(self) -> None:
         if self._redis is not None:
