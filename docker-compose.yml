@@ -66,9 +66,15 @@ services:
       - path: .env
         required: false
     environment:
-      # Base .env'deki REDIS_URL'i redis servisinin parolali baglantisiyla ezer
-      # (colendi-gateway kaliginda oldugu gibi compose her zaman kendi agini kullanir).
-      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD gerekli}@redis:6379/0
+      # Base .env'deki REDIS_URL'i redis servisinin agina isaret edecek sekilde
+      # ezer (compose her zaman kendi agini kullanir). HIGH-1 (PR#19 review):
+      # parola artik URL'e GOMULMEZ -- REDIS_PASSWORD ayri env olarak gecirilir,
+      # app/config.py `_build_redis_url` bunu TEK NOKTADA percent-encode ederek
+      # birlestirir (`/`, `+`, `=` iceren parolalar -- openssl rand -base64 32
+      # ~%50 uretir -- eskiden urlparse/redis.from_url'u ValueError'a dusurup
+      # api/updater/bot'u crash-loop'a sokuyordu).
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD gerekli}
     # Updater HTTP servisi degildir; HTTP healthcheck'i devre disi birak.
     healthcheck:
       disable: true
@@ -104,7 +110,11 @@ services:
       - path: .env
         required: false
     environment:
-      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD gerekli}@redis:6379/0
+      # HIGH-1 (PR#19 review): bkz. updater servisindeki ayni satirin ustundeki
+      # aciklama -- parola URL'e gomulmez, ayri env + app/config.py tek-nokta
+      # percent-encode.
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD gerekli}
     ports:
       - "8000:8000"
     depends_on:
@@ -142,7 +152,11 @@ services:
       - path: .env
         required: false
     environment:
-      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD gerekli}@redis:6379/0
+      # HIGH-1 (PR#19 review): bkz. updater servisindeki ayni satirin ustundeki
+      # aciklama -- parola URL'e gomulmez, ayri env + app/config.py tek-nokta
+      # percent-encode.
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD gerekli}
       - TELEGRAM_API_URL=http://api:8000
     healthcheck:
       disable: true

@@ -156,3 +156,89 @@ def test_providers_env_can_still_reenable_tradingview(monkeypatch):
     monkeypatch.setenv("PROVIDERS", "yahoo_chart,tradingview,isyatirim")
     cfg = Settings()
     assert cfg.providers == ["yahoo_chart", "tradingview", "isyatirim"]
+
+
+# --------------------------------------------------------------------------- #
+# HIGH-1 regresyonu (PR#19 review): `/` iceren Redis parolasi REDIS_URL'i
+# kirmamali. `openssl rand -base64 32` uretimi parolalarin ~%50'si `/` (bazen
+# `+`,`=`) icerir; docker-compose.yml bunu eskiden dogrudan URL'e gomuyordu --
+# urlparse/redis.from_url "ValueError: Port could not be cast" ile patliyor,
+# redis sunucusu saglikli kalirken (REDISCLI_AUTH kullanir) api/updater/bot
+# crash-loop'a giriyordu.
+# --------------------------------------------------------------------------- #
+def test_build_redis_url_percent_encodes_slash_password():
+    from app.config import _build_redis_url
+    from redis.connection import parse_url
+
+    password = "ab/cd+ef=gh"  # / + = iceren tipik base64 parola
+    url = _build_redis_url("redis://redis:6379/0", password)
+
+    parsed = parse_url(url)  # regresyon: eskiden ValueError atardi
+    assert parsed["password"] == password
+    assert parsed["host"] == "redis"
+    assert parsed["port"] == 6379
+
+
+def test_build_redis_url_noop_when_password_empty():
+    from app.config import _build_redis_url
+
+    assert _build_redis_url("redis://redis:6379/0", "") == "redis://redis:6379/0"
+
+
+def test_build_redis_url_noop_when_url_empty():
+    from app.config import _build_redis_url
+
+    assert _build_redis_url("", "parola") == ""
+
+
+def test_build_redis_url_does_not_override_existing_credentials():
+    """REDIS_URL elle (compose-disi, orn. harici yonetilen Redis) kimlik
+    bilgisiyle verilmisse dokunulmaz -- REDIS_PASSWORD yalniz compose'un
+    kendi ayirdigi (kimlik-bilgisiz REDIS_URL) senaryosunda enjekte edilir."""
+    from app.config import _build_redis_url
+
+    url = "redis://:existing-pw@redis:6380/0"
+    assert _build_redis_url(url, "OVERRIDE") == url
+
+
+def test_validate_redis_url_raises_for_unencoded_slash_password():
+    from app.config import _validate_redis_url
+
+    with pytest.raises(RuntimeError, match="REDIS_URL"):
+        _validate_redis_url("redis://:ab/cd+ef=@redis:6379/0")
+
+
+def test_validate_redis_url_noop_for_valid_or_empty_url():
+    from app.config import _validate_redis_url
+
+    _validate_redis_url("redis://:ab%2Fcd%2Bef%3D@redis:6379/0")  # raise etmemeli
+    _validate_redis_url("")  # redis kapali -- raise etmemeli
+
+
+def test_settings_builds_safe_redis_url_from_separate_password_env(monkeypatch):
+    """Compose'un gercek uretim senaryosu: REDIS_URL kimlik-bilgisiz, parola
+    ayri REDIS_PASSWORD env'inden gelir. `/`+`=` iceren bir parolayla bile
+    Settings() FAIL-FAST'e DUSMEMELI -- redis_url otomatik guvenli olur ve
+    ham parola kayipsiz geri kazanilabilir olmali."""
+    from app.config import Settings
+    from redis.connection import parse_url
+
+    monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setenv("REDIS_PASSWORD", "ab/cd+ef=gh")
+    cfg = Settings()
+    parsed = parse_url(cfg.redis_url)
+    assert parsed["password"] == "ab/cd+ef=gh"
+    assert parsed["host"] == "redis"
+
+
+def test_settings_fails_fast_for_manually_broken_redis_url(monkeypatch):
+    """Savunma-katmani (HIGH-1): REDIS_URL elle (compose-disi) kimlik-bilgili
+    VE URL-ozel karakter iceren bozuk bir parolayla verilirse Settings()
+    ACILISTA net bir RuntimeError ile durmali -- crash-loop + belirsiz
+    'ValueError: Port could not be cast' yerine actionable hata."""
+    from app.config import Settings
+
+    monkeypatch.setenv("REDIS_URL", "redis://:ab/cd+ef=@redis:6379/0")
+    monkeypatch.delenv("REDIS_PASSWORD", raising=False)
+    with pytest.raises(RuntimeError, match="REDIS_URL"):
+        Settings()

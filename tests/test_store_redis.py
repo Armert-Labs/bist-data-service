@@ -2,7 +2,7 @@
 
 import fakeredis.aioredis
 from app.models import Quote
-from app.store import RedisStore
+from app.store import RedisStore, _mask_redis_url
 
 
 def _store():
@@ -88,3 +88,59 @@ async def test_ping_false_when_redis_down():
     store = RedisStore("redis://fake", "test")
     store._redis = DeadRedis()
     assert await store.ping() is False
+
+
+# --------------------------------------------------------------------------- #
+# HIGH-1/HIGH-2 regresyonu (PR#19 review)
+# --------------------------------------------------------------------------- #
+async def test_connect_with_slash_password_builds_parseable_url(monkeypatch):
+    """HIGH-1: `/`+`=` iceren parola (openssl rand -base64 32 ~%50 uretir)
+    RedisStore.connect()'i kirmamali. app.config._build_redis_url'in urettigi
+    URL, redis.asyncio.from_url'e GECERLI (urlparse edilebilir, parola
+    kayipsiz geri kazanilabilir) sekilde iletilmeli -- eskiden
+    'ValueError: Port could not be cast' ile patlardi."""
+    from app.config import _build_redis_url
+    from redis.connection import parse_url
+
+    password = "ab/cd+ef=gh"
+    url = _build_redis_url("redis://redis:6379/0", password)
+
+    captured: dict[str, str] = {}
+
+    class FakeRedis:
+        async def ping(self):
+            return True
+
+    def fake_from_url(target_url, **kwargs):
+        captured["url"] = target_url
+        return FakeRedis()
+
+    monkeypatch.setattr("redis.asyncio.from_url", fake_from_url)
+
+    store = RedisStore(url, "test")
+    await store.connect()  # regresyon: eskiden ValueError ile patlardi
+
+    parsed = parse_url(captured["url"])
+    assert parsed["password"] == password
+    assert parsed["host"] == "redis"
+    assert parsed["port"] == 6379
+
+
+def test_mask_redis_url_hides_password_in_encoded_url():
+    """HIGH-2: baglanti loglarinda parola ASLA gorunmemeli."""
+    from app.config import _build_redis_url
+
+    password = "ab/cd+ef=gh"
+    url = _build_redis_url("redis://redis:6379/0", password)
+
+    masked = _mask_redis_url(url)
+    assert password not in masked
+    assert "***" in masked
+    assert "redis:6379/0" in masked
+
+
+def test_mask_redis_url_no_leak_on_malformed_url():
+    """Savunma-katmani: ayristirilamayan (bozuk) bir URL bile parolayi
+    log'a sizdirmamali (fallback: tamami maskelenir)."""
+    masked = _mask_redis_url("redis://:ab/cd+ef=@redis:6379/0")
+    assert "ab/cd+ef=" not in masked

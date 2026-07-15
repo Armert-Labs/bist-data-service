@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from urllib.parse import quote, urlsplit, urlunsplit
 
 
 def _get_float(name: str, default: float) -> float:
@@ -39,6 +40,59 @@ def _get_list(name: str, default: list[str]) -> list[str]:
 
 def _get_str(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def _build_redis_url(url: str, password: str) -> str:
+    """HIGH-1 (review, PR#19): docker-compose.yml REDIS_PASSWORD'u artik
+    REDIS_URL'e GOMMEDEN (kimlik-bilgisiz `redis://redis:6379/0`) ayri bir
+    env olarak tasir; parola burada, TEK NOKTADA, percent-encode edilerek
+    URL'e eklenir. `openssl rand -base64 32` uretilen parolalarin ~%50'si
+    `/` (bazen `+`, `=`) icerir -- bu karakterler URL userinfo alaninda
+    ayrilmis (reserved) oldugundan ham haliyle gomulurse `urlparse`/
+    `redis.from_url` (ve limits/slowapi rate-limiter storage_uri'si, o da
+    ayni `redis.from_url`'u cagirir) `ValueError: Port could not be cast`
+    ile patlar -- redis sunucusu REDISCLI_AUTH kullandigi icin saglikli
+    kalir ama api/updater/bot crash-loop'a girer (sessiz degil, ama
+    kafa karistirici). quote(safe='') ANY parola degeri icin (yalniz `/`
+    degil `@`, `:`, `#`, `?`, `%` de dahil) guvenlidir; redis-py `parse_url`
+    zaten `unquote` uyguladigi icin sunucu tarafinda parola degismeden
+    geri cikar (dogrulandi). url zaten kimlik bilgisi tasiyorsa (elle
+    `REDIS_URL=redis://:pw@host:port/db` -- orn. compose-disi/harici
+    yonetilen Redis) DOKUNULMAZ: REDIS_PASSWORD yalniz compose'un kendi
+    ayirdigi senaryoda dolu olur."""
+    if not url or not password:
+        return url
+    parsed = urlsplit(url)
+    if parsed.password or parsed.username:
+        return url
+    netloc = parsed.hostname or ""
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    netloc = f":{quote(password, safe='')}@{netloc}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _validate_redis_url(url: str) -> None:
+    """Fail-fast guard (HIGH-1 savunma-katmani): `_build_redis_url` normal
+    compose akisinda URL'i zaten guvenli hale getirir, ama REDIS_URL'in
+    ELLE (compose-disi, kimlik bilgisi ONCEDEN gomulu) verildigi durumda
+    parola hala URL-ozel karakter icerebilir. Boyle bir URL sessizce
+    RedisStore.connect()/telegram_bot/rate-limiter icinde patlamak yerine,
+    servis ACILISTA NET bir hatayla durur -- crash-loop + belirsiz
+    `ValueError: Port could not be cast` yerine actionable mesaj."""
+    if not url:
+        return
+    try:
+        parsed = urlsplit(url)
+        _ = parsed.port  # tetikleyici: bozuk userinfo/port burada patlar
+    except ValueError as exc:
+        raise RuntimeError(
+            "REDIS_URL ayristirilamiyor (gecersiz port/kimlik bilgisi). Parola "
+            "URL-ozel karakter (/, +, =, @, : vb.) iceriyorsa REDIS_URL yerine "
+            "REDIS_URL=redis://host:port/db (kimlik bilgisiz) + REDIS_PASSWORD="
+            "PAROLA kullanin -- parola otomatik guvenli sekilde URL'e gomulur "
+            "(bkz. .env.example, docker-compose.yml)."
+        ) from exc
 
 
 # BIST tam gun kapali resmi tatiller. 2026 dini bayramlar ilan edilmis takvime
@@ -304,7 +358,18 @@ class Settings:
     )
 
     # --- Redis (bos ise in-memory store kullanilir) ---
-    redis_url: str = field(default_factory=lambda: _get_str("REDIS_URL", ""))
+    # HIGH-1 (PR#19 review): REDIS_URL, REDIS_PASSWORD varsa `_build_redis_url`
+    # ile TEK NOKTADA guvenli (percent-encoded) sekilde birlestirilir -- bkz.
+    # yukaridaki fonksiyon docstring'i. RedisStore/telegram_bot/rate-limiter
+    # (deps.py storage_uri) HEPSI bu alani okur, degisiklik gerektirmezler.
+    redis_url: str = field(
+        default_factory=lambda: _build_redis_url(
+            _get_str("REDIS_URL", ""), _get_str("REDIS_PASSWORD", "")
+        )
+    )
+    # Ham parola (compose'un ayri gecirdigi env) -- yalniz `redis_url`
+    # insasinda kullanilir, baska hicbir yerde okunmaz/loglanmaz.
+    redis_password: str = field(default_factory=lambda: _get_str("REDIS_PASSWORD", ""))
     redis_prefix: str = field(default_factory=lambda: _get_str("REDIS_PREFIX", "bist"))
 
     # --- Guvenlik / kimlik dogrulama ---
@@ -404,6 +469,13 @@ class Settings:
     market_open_minute: int = 0
     market_close_hour: int = 18
     market_close_minute: int = 15
+
+    def __post_init__(self) -> None:
+        # HIGH-1 savunma-katmani: `redis_url` `_build_redis_url` ile normal
+        # compose akisinda zaten guvenli hale gelir; bu, YALNIZCA REDIS_URL'in
+        # elle/compose-disi kimlik-bilgili verildigi (ve hala bozuk oldugu)
+        # durumda acilista NET hatayla durur (bkz. _validate_redis_url).
+        _validate_redis_url(self.redis_url)
 
     @property
     def api_key_enabled(self) -> bool:
