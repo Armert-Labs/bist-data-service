@@ -202,6 +202,15 @@ class BackgroundUpdater:
         timeout = settings.updater_cycle_timeout
         try:
             await asyncio.wait_for(self._cycle_work(), timeout if timeout > 0 else None)
+        # LOW-2 (wedge-review): burada yakalanan yalniz asyncio.wait_for'un
+        # KENDI butce asimidir (builtins.TimeoutError, Python 3.11+'ta
+        # asyncio.TimeoutError ile ayni). `redis.exceptions.TimeoutError`
+        # (store.py socket_timeout fix'i asilinca) BUNUN ALT SINIFI DEGILDIR
+        # (RedisError -> Exception soy agacindadir, dogrulandi) -- bu yuzden
+        # bir Redis soket-timeout'u burada YAKALANMAZ, _loop()'un genel
+        # `except Exception:`'ina duser (metrik/log burada degil orada,
+        # daha az spesifik bir mesajla kaydedilir). Zararsizdir (yine
+        # yakalanir) ama UPDATE_CYCLE_TIMEOUTS sayaci bu durumda ARTMAZ.
         except TimeoutError:
             metrics.UPDATE_CYCLE_TIMEOUTS.inc()
             logger.error(

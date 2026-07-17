@@ -72,6 +72,38 @@ def _build_redis_url(url: str, password: str) -> str:
     return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
+def _enforce_watchdog_floor(cfg: Settings) -> None:
+    """MEDIUM-1 (wedge-review, PR#20 ek): watchdog_timeout guvenli bir
+    invariant korumali -- saglikli TEK bir turun en kotu olcekte alabilecegi
+    sure (guard + cycle + guard) + UPDATE_INTERVAL'den KUCUK kalirsa, operator
+    yalniz UPDATER_CYCLE_TIMEOUT'u yukseltip UPDATER_WATCHDOG_TIMEOUT'u
+    unutursa SAGLIKLI surecte bile watchdog onu 'wedge' sanip surekli
+    os._exit ile sureci oldurur (thrash). Config yanlissa fail-safe: taban
+    deger otomatik uygulanir + WARNING loglanir -- crash-loop yerine erken/
+    gorunur (log) bir duzeltme tercih edildi (bkz. _validate_redis_url'in
+    RuntimeError'i: o guvenlik riski, bu yalniz operasyonel bir uyumsuzluk)."""
+    buffer_seconds = 60.0
+    floor = (
+        cfg.update_interval
+        + cfg.updater_cycle_timeout
+        + 2 * cfg.updater_guard_timeout
+        + buffer_seconds
+    )
+    if cfg.updater_watchdog_timeout < floor:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "UPDATER_WATCHDOG_TIMEOUT=%.0fsn guvenli tabanin (%.0fsn = "
+            "UPDATE_INTERVAL+UPDATER_CYCLE_TIMEOUT+2*UPDATER_GUARD_TIMEOUT+"
+            "%.0fsn tampon) ALTINDA -- saglikli surecte os._exit thrash'ini "
+            "onlemek icin tabana yukseltiliyor.",
+            cfg.updater_watchdog_timeout,
+            floor,
+            buffer_seconds,
+        )
+        object.__setattr__(cfg, "updater_watchdog_timeout", floor)
+
+
 def _validate_redis_url(url: str) -> None:
     """Fail-fast guard (HIGH-1 savunma-katmani): `_build_redis_url` normal
     compose akisinda URL'i zaten guvenli hale getirir, ama REDIS_URL'in
@@ -511,6 +543,7 @@ class Settings:
         # elle/compose-disi kimlik-bilgili verildigi (ve hala bozuk oldugu)
         # durumda acilista NET hatayla durur (bkz. _validate_redis_url).
         _validate_redis_url(self.redis_url)
+        _enforce_watchdog_floor(self)
 
     @property
     def api_key_enabled(self) -> bool:

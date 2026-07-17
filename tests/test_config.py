@@ -242,3 +242,45 @@ def test_settings_fails_fast_for_manually_broken_redis_url(monkeypatch):
     monkeypatch.delenv("REDIS_PASSWORD", raising=False)
     with pytest.raises(RuntimeError, match="REDIS_URL"):
         Settings()
+
+
+# --------------------------------------------------------------------------- #
+# MEDIUM-1 (wedge-review, PR#20 ek): watchdog_timeout guvenli taban invariant'i.
+# --------------------------------------------------------------------------- #
+def test_watchdog_timeout_clamped_to_safe_floor_when_misconfigured(monkeypatch, caplog):
+    """UPDATER_CYCLE_TIMEOUT yukseltilip UPDATER_WATCHDOG_TIMEOUT unutulursa
+    SAGLIKLI surecte os._exit thrash'i baslamamali -- Settings() acilista
+    tabana (UPDATE_INTERVAL+UPDATER_CYCLE_TIMEOUT+2*UPDATER_GUARD_TIMEOUT+
+    60sn) otomatik yukseltir + WARNING loglar (crash-loop yerine gorunur
+    fail-safe duzeltme)."""
+    from app.config import Settings
+
+    monkeypatch.setenv("UPDATE_INTERVAL", "60")
+    monkeypatch.setenv("UPDATER_CYCLE_TIMEOUT", "1000")  # operator yukseltti
+    monkeypatch.setenv("UPDATER_GUARD_TIMEOUT", "20")
+    monkeypatch.setenv("UPDATER_WATCHDOG_TIMEOUT", "600")  # unutuldu -- artik yetersiz
+
+    with caplog.at_level("WARNING", logger="app.config"):
+        cfg = Settings()
+
+    expected_floor = 60.0 + 1000.0 + 2 * 20.0 + 60.0  # 1160.0
+    assert cfg.updater_watchdog_timeout == expected_floor
+    assert any("UPDATER_WATCHDOG_TIMEOUT" in r.message for r in caplog.records)
+
+
+def test_watchdog_timeout_untouched_when_already_safe(monkeypatch, caplog):
+    """Guvenli bir konfigurasyon (taban altinda DEGIL) dokunulmadan
+    KORUNMALI -- yanlis-pozitif klemp/uyari olmamali."""
+    from app.config import Settings
+
+    monkeypatch.setenv("UPDATE_INTERVAL", "60")
+    monkeypatch.setenv("UPDATER_CYCLE_TIMEOUT", "240")
+    monkeypatch.setenv("UPDATER_GUARD_TIMEOUT", "20")
+    # taban = 60+240+2*20+60 = 400 -- 600 zaten uzerinde
+    monkeypatch.setenv("UPDATER_WATCHDOG_TIMEOUT", "600")
+
+    with caplog.at_level("WARNING", logger="app.config"):
+        cfg = Settings()
+
+    assert cfg.updater_watchdog_timeout == 600.0
+    assert not any("UPDATER_WATCHDOG_TIMEOUT" in r.message for r in caplog.records)
