@@ -412,17 +412,31 @@ async def ready() -> dict:
     """Readiness: store erisilebilir ve veri taze mi. (Trafik almaya hazir mi.)"""
     # Store (Redis) tamamen koptugunde bile sozlesmedeki yapisal 503 govdesi
     # donmeli; ping ile cagri arasindaki yariska karsi tum erisim korunur.
+    # Wedge fix: dedektorun KENDISI wedge'e dayanikli olmali -- store.py'deki
+    # socket_timeout fix'ine ragmen (savunma-katmani) probe'un tamami ek bir
+    # ust butce ile sarilir; asilirsa store COKMESIYLE AYNI yapisal 503'e duser.
     size, stale, oldest_age, fresh, last_age = 0, True, None, None, None
-    try:
+
+    async def _probe() -> tuple[bool, int, bool, float | None, float | None, float | None]:
         store_ok = await store.ping()
-        if store_ok:
-            size = await store.size()
-            stale = await store.is_stale()
-            oldest_age = await store.staleness_seconds()
-            fresh = await store.fresh_ratio()
-            last_update = await store.last_update()
-            last_age = (datetime.now(UTC) - last_update).total_seconds() if last_update else None
+        if not store_ok:
+            return False, 0, True, None, None, None
+        size_ = await store.size()
+        stale_ = await store.is_stale()
+        oldest_age_ = await store.staleness_seconds()
+        fresh_ = await store.fresh_ratio()
+        last_update = await store.last_update()
+        last_age_ = (datetime.now(UTC) - last_update).total_seconds() if last_update else None
+        return store_ok, size_, stale_, oldest_age_, fresh_, last_age_
+
+    try:
+        store_ok, size, stale, oldest_age, fresh, last_age = await asyncio.wait_for(
+            _probe(), timeout=settings.ready_probe_timeout
+        )
     except Exception:
+        # asyncio.wait_for'un TimeoutError'i (Python 3.11+ builtins.TimeoutError
+        # ile aynidir) burada zaten Exception'in bir alt sinifidir -- store
+        # ASILMASI da COKMESI ile ayni yapisal 503 govdesine duser.
         logger.exception("/ready store erisim hatasi")
         store_ok = False
         size, stale, oldest_age, fresh, last_age = 0, True, None, None, None

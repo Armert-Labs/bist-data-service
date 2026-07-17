@@ -444,3 +444,169 @@ async def test_universe_refresh_runs_before_update_not_concurrent(monkeypatch, o
     assert "update" in order
     # _update_once refresh sonrasi genisletilmis listeyi gordu (atomik swap).
     assert {"GARAN", "SISE"}.issubset(seen_symbols["snapshot"])
+
+
+# --------------------------------------------------------------------------- #
+# Wedge fix: guard'sizdi -- _maybe_refresh_universe()/_refresh_age_metric()
+# updater_cycle_timeout kapsami DISINDA cagrilir, guard'siz bir Redis/HTTP
+# cagrisi asilirsa TUM dongu suresiz kilitleniyordu (kok neden).
+# --------------------------------------------------------------------------- #
+async def test_loop_recovers_when_universe_refresh_hangs(monkeypatch, override_settings):
+    """_maybe_refresh_universe() asyncio.wait_for ile sarili -- asilan cagri
+    bu turu atlatir, TUM donguyu KALICI kilitlemez."""
+    override_settings(
+        updater_guard_timeout=0.05,
+        update_interval=0.01,
+        update_when_closed=True,
+        updater_cycle_timeout=5.0,
+    )
+    store = MemoryStore()
+    await store.connect()
+    up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
+
+    async def hang_forever():
+        await asyncio.sleep(1000)
+
+    calls = {"n": 0}
+
+    async def fast_update():
+        calls["n"] += 1
+        return 0
+
+    monkeypatch.setattr(up, "_maybe_refresh_universe", hang_forever)
+    monkeypatch.setattr(up, "_update_once", fast_update)
+
+    up.start()
+    for _ in range(300):
+        if calls["n"] >= 2:
+            break
+        await asyncio.sleep(0.02)
+    await up.stop()
+    assert calls["n"] >= 2  # asilan refresh_universe sonraki turu ENGELLEMEDI
+
+
+async def test_loop_recovers_when_refresh_age_metric_hangs(monkeypatch, override_settings):
+    """_refresh_age_metric() asyncio.wait_for ile sarili -- asilan cagri bu
+    turu atlatir, TUM donguyu KALICI kilitlemez (asil nuks senaryosu)."""
+    override_settings(
+        updater_guard_timeout=0.05,
+        update_interval=0.01,
+        update_when_closed=True,
+        updater_cycle_timeout=5.0,
+    )
+    store = MemoryStore()
+    await store.connect()
+    up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
+
+    async def hang_forever():
+        await asyncio.sleep(1000)
+
+    calls = {"n": 0}
+
+    async def fast_update():
+        calls["n"] += 1
+        return 0
+
+    monkeypatch.setattr(up, "_refresh_age_metric", hang_forever)
+    monkeypatch.setattr(up, "_update_once", fast_update)
+
+    up.start()
+    for _ in range(300):
+        if calls["n"] >= 2:
+            break
+        await asyncio.sleep(0.02)
+    await up.stop()
+    assert calls["n"] >= 2  # asilan refresh_age_metric sonraki turu ENGELLEMEDI
+
+
+async def test_loop_running_flag_resets_on_external_cancellation(monkeypatch, override_settings):
+    """LOW (wedge fix): stop()'un fallback yolu (_task.cancel()) CancelledError'i
+    while-dongusune enjekte eder -- try/finally OLMADAN `running` sonsuza dek
+    True'da TAKILI kalirdi (surecin sessizce oldugunu gizleyen yanlis bir
+    canlilik sinyali)."""
+    override_settings(update_when_closed=True, updater_cycle_timeout=1000)
+    store = MemoryStore()
+    await store.connect()
+    up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
+
+    async def hang_forever():
+        await asyncio.sleep(1000)
+
+    monkeypatch.setattr(up, "_update_once", hang_forever)
+
+    up.start()
+    for _ in range(200):
+        if up.running:
+            break
+        await asyncio.sleep(0.01)
+    assert up.running is True
+
+    up._stop.set()  # watchdog bunu gorup temiz cikar
+    up._task.cancel()  # ana dongu _update_once icinde asili -- disaridan iptal simulasyonu
+    with pytest.raises(asyncio.CancelledError):
+        await up._task
+    assert up.running is False
+
+    if up._watchdog_task is not None:
+        await asyncio.wait_for(up._watchdog_task, timeout=2)
+
+
+async def test_watchdog_hard_exits_when_loop_wedged(monkeypatch, override_settings):
+    """Savunma-katmani: guard'lara ragmen (varsayimsal -- ust butcenin bir
+    sekilde etkisiz kaldigi senaryo) ana dongu tur tamamlayamazsa bagimsiz
+    watchdog Task'i sureci sonlandirir. Testte gercek os._exit yerine enjekte
+    edilen _exit_fn cagrisi kanit olarak yeterli (surec-sonlandirmayi
+    TETIKLEMEZ)."""
+    override_settings(
+        updater_watchdog_timeout=0.05,
+        updater_watchdog_check_interval=0.01,
+        update_when_closed=True,
+        updater_cycle_timeout=1000,  # bu senaryoda devre disi gibi davransin
+    )
+    store = MemoryStore()
+    await store.connect()
+    up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
+
+    exit_calls: list[int] = []
+    monkeypatch.setattr(up, "_exit_fn", lambda code: exit_calls.append(code))
+
+    async def hang_forever():
+        await asyncio.sleep(1000)
+
+    monkeypatch.setattr(up, "_update_once", hang_forever)
+
+    up.start()
+    for _ in range(300):
+        if exit_calls:
+            break
+        await asyncio.sleep(0.02)
+    await up.stop()
+    assert exit_calls == [1]
+
+
+async def test_watchdog_does_not_exit_during_healthy_loop(monkeypatch, override_settings):
+    """Sagliksiz-pozitif regresyonu: saglikli, hizli turlar atan bir dongu
+    watchdog'u ASLA tetiklememeli."""
+    override_settings(
+        updater_watchdog_timeout=5.0,
+        updater_watchdog_check_interval=0.01,
+        update_interval=0.02,
+        update_when_closed=True,
+        updater_cycle_timeout=5.0,
+    )
+    store = MemoryStore()
+    await store.connect()
+    up = BackgroundUpdater(symbols_list=["THYAO"], store=store)
+
+    exit_calls: list[int] = []
+    monkeypatch.setattr(up, "_exit_fn", lambda code: exit_calls.append(code))
+
+    async def fast_update():
+        return 0
+
+    monkeypatch.setattr(up, "_update_once", fast_update)
+
+    up.start()
+    await asyncio.sleep(0.3)  # bircok saglikli tur + watchdog kontrolu gecsin
+    await up.stop()
+    assert exit_calls == []
