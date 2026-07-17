@@ -144,3 +144,32 @@ def test_mask_redis_url_no_leak_on_malformed_url():
     log'a sizdirmamali (fallback: tamami maskelenir)."""
     masked = _mask_redis_url("redis://:ab/cd+ef=@redis:6379/0")
     assert "ab/cd+ef=" not in masked
+
+
+# --------------------------------------------------------------------------- #
+# Wedge fix (kok neden): baglanti KURULDUKTAN SONRA bir komutun soket okumasi
+# sessizce asilirsa eskiden hicbir sinir yoktu.
+# --------------------------------------------------------------------------- #
+async def test_connect_passes_socket_timeout_for_hang_protection(monkeypatch, override_settings):
+    """RedisStore.connect() artik settings.redis_socket_timeout'u redis-py'a
+    iletir -- boylece baglanti kurulduktan sonraki bir komut soket okumasinda
+    asilirsa suresiz beklemek yerine TimeoutError firlatir (updater/api'nin
+    kendi guard'lari bunu yakalayabilir)."""
+    override_settings(redis_socket_timeout=7.5)
+
+    captured: dict[str, object] = {}
+
+    class FakeRedis:
+        async def ping(self):
+            return True
+
+    def fake_from_url(url, **kwargs):
+        captured.update(kwargs)
+        return FakeRedis()
+
+    monkeypatch.setattr("redis.asyncio.from_url", fake_from_url)
+
+    store = RedisStore("redis://fake:6379/0", "test")
+    await store.connect()
+
+    assert captured["socket_timeout"] == 7.5

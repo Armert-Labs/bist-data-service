@@ -414,6 +414,7 @@ class RedisStore(Store):
             self._url,
             decode_responses=True,
             socket_connect_timeout=5,
+            socket_timeout=settings.redis_socket_timeout,
             socket_keepalive=True,
             health_check_interval=30,
         )

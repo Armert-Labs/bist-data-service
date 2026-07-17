@@ -485,6 +485,24 @@ def test_ready_returns_structured_503_when_store_down(monkeypatch):
         assert r.json()["detail"]["store_ok"] is False
 
 
+def test_ready_returns_structured_503_when_store_hangs(monkeypatch, override_settings):
+    """Wedge fix: /ready DEDEKTORUN KENDISI store cagrisi asilirsa (redis
+    socket_timeout fix'ine ragmen, savunma-katmani) suresiz beklememeli --
+    ready_probe_timeout asiminda store COKMESIYLE AYNI yapisal 503 doner."""
+    import asyncio
+
+    override_settings(ready_probe_timeout=0.05)
+
+    async def hang(*a, **k):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr("app.main.store.ping", hang)
+    with TestClient(app) as c:
+        r = c.get("/ready")
+        assert r.status_code == 503
+        assert r.json()["detail"]["store_ok"] is False
+
+
 def test_quotes_reports_missing_symbols(monkeypatch):
     """Istemci 'sembol yok' ile 'veri gelmedi'yi ayirt edebilmeli."""
     _seed_store()

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import time
 from collections import defaultdict
 
@@ -35,6 +36,12 @@ class BackgroundUpdater:
         self._cycle = 0
         self._next_universe_check: float | None = None
         self.running = False
+        # Wedge fix: bagimsiz canlilik bekcisi (bkz. _watchdog_loop).
+        self._watchdog_task: asyncio.Task | None = None
+        self._last_tick_monotonic: float = time.monotonic()
+        # Testte gercek surec-sonlandirmayi tetiklemeden kanit uretmek icin
+        # enjekte edilebilir (bkz. test_updater.py) -- uretimde os._exit.
+        self._exit_fn = os._exit
 
     @property
     def symbols(self) -> list[str]:
@@ -206,27 +213,95 @@ class BackgroundUpdater:
     async def _loop(self) -> None:
         self.running = True
         first = True
-        while not self._stop.is_set():
-            try:
-                # Dongu basinda (update ONCESI, lock DISINDA): evreni atomik yenile.
-                await self._maybe_refresh_universe()
-                if first or settings.update_when_closed or is_market_open():
-                    async with self._update_lock:
-                        self._update_running = True
-                        try:
-                            if await self._run_cycle():
-                                first = False
-                        finally:
-                            self._update_running = False
-                else:
-                    logger.debug("Piyasa kapali; guncelleme atlandi.")
-                await self._refresh_age_metric()
-            except Exception:
-                logger.exception("Guncelleme dongusunde beklenmeyen hata")
+        try:
+            while not self._stop.is_set():
+                try:
+                    # Dongu basinda (update ONCESI, lock DISINDA): evreni atomik
+                    # yenile. Wedge fix: bu cagri eskiden guard'sizdi -- HTTP
+                    # istegi sessizce asilirsa TUM dongu suresiz kilitleniyordu
+                    # (updater_cycle_timeout kapsami DISINDA). Simdi kendi
+                    # butcesiyle sarili; asimda tur bu adimi atlayip devam eder.
+                    try:
+                        await asyncio.wait_for(
+                            self._maybe_refresh_universe(), timeout=settings.updater_guard_timeout
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            "Sembol evreni yenileme %.0f sn butcesini asti; bu tur atlandi.",
+                            settings.updater_guard_timeout,
+                        )
+                    if first or settings.update_when_closed or is_market_open():
+                        async with self._update_lock:
+                            self._update_running = True
+                            try:
+                                if await self._run_cycle():
+                                    first = False
+                            finally:
+                                self._update_running = False
+                    else:
+                        logger.debug("Piyasa kapali; guncelleme atlandi.")
+                    # Wedge fix (kok neden): bu cagri _run_cycle'in zaman
+                    # butcesi DISINDAYDI -- icindeki store.oldest_update_age()
+                    # bir Redis soket okumasinda sessizce asilirsa (bkz.
+                    # store.py RedisStore.connect socket_timeout) dongu bir
+                    # daha ASLA tur atamiyordu (piyasa acik olsa bile).
+                    try:
+                        await asyncio.wait_for(
+                            self._refresh_age_metric(), timeout=settings.updater_guard_timeout
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            "Yas metrigi yenileme %.0f sn butcesini asti; bu tur atlandi.",
+                            settings.updater_guard_timeout,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Guncelleme dongusunde beklenmeyen hata")
 
+                # Watchdog icin canlilik damgasi: bu satira ulasilmasi bir
+                # TURUN (basarili/hatali/timeout'lu farketmez) tamamlandigini
+                # kanitlar -- bkz. _watchdog_loop.
+                self._last_tick_monotonic = time.monotonic()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop.wait(), timeout=settings.update_interval)
+        finally:
+            # LOW (wedge fix): disaridan iptal edilirse (bkz. stop() fallback)
+            # CancelledError while-dongusunu KIRAR -- try/finally OLMADAN bu
+            # satir hic calismaz, `running` sonsuza dek True'da TAKILI kalirdi
+            # (surecin sessizce oldugunu gizleyen yanlis bir canlilik sinyali).
+            self.running = False
+
+    async def _watchdog_loop(self) -> None:
+        """Bagimsiz canlilik bekcisi (savunma-katmani).
+
+        Yukaridaki guard'lar (updater_guard_timeout, updater_cycle_timeout)
+        bilinen tum asilma noktalarini kapatir, ama gelecekte baska bir
+        guard'siz await eklenirse (veya beklenmeyen bir kutuphane davranisi
+        cikarsa) ana dongu yine de asilabilir. Bu, AYRI bir Task oldugu icin
+        ana dongudeki TEK bir coroutine'in asilmasi (event loop'un KENDISI
+        senkron/bloklayici bir cagriyla tikanmadigi surece) bu Task'i
+        etkilemez. Esik asilirsa surec SERT sekilde sonlandirilir -- updater
+        HTTP servisi olmadigi icin Docker healthcheck'i yoktur; compose'daki
+        'restart: unless-stopped' surecin oldugunu gorup yeniden baslatir.
+        """
+        while not self._stop.is_set():
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stop.wait(), timeout=settings.update_interval)
-        self.running = False
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=settings.updater_watchdog_check_interval
+                )
+            if self._stop.is_set():
+                return
+            idle = time.monotonic() - self._last_tick_monotonic
+            if idle > settings.updater_watchdog_timeout:
+                logger.critical(
+                    "Watchdog: ana guncelleme dongusu %.0f sn'dir tur tamamlamadi "
+                    "(esik %.0f sn) -- surec sonlandiriliyor.",
+                    idle,
+                    settings.updater_watchdog_timeout,
+                )
+                self._exit_fn(1)
+                return
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -234,11 +309,19 @@ class BackgroundUpdater:
             # Baslangic degeri: refresh kapali/henuz calismamisken gauge 0 (yaniltici
             # "takip listesi bos") gorunmesin.
             metrics.WATCHLIST_SIZE.set(len(self._symbols))
+            self._last_tick_monotonic = time.monotonic()
             self._task = asyncio.create_task(self._loop())
+            if self._watchdog_task is None or self._watchdog_task.done():
+                self._watchdog_task = asyncio.create_task(self._watchdog_loop())
             logger.info("Arka plan guncelleyici baslatildi (%d sembol).", len(self._symbols))
 
     async def stop(self) -> None:
         self._stop.set()
+        if self._watchdog_task is not None:
+            try:
+                await asyncio.wait_for(self._watchdog_task, timeout=5)
+            except TimeoutError:
+                self._watchdog_task.cancel()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=10)

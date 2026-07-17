@@ -518,6 +518,43 @@ ruff + mypy temiz.
 
 345 test yeşil (değişmedi), ruff + mypy temiz.
 
+### Düzeltildi (devam 8) — wedge/donmuş updater KÖK NEDENİ (15-16 Temmuz nüksü)
+- **Kök neden:** `RedisStore.connect()` yalnız `socket_connect_timeout`
+  ayarlıyordu (TCP el sıkışma) — bağlantı **kurulduktan sonra** bir komutun
+  soket okuması sessizce asılırsa hiçbir sınır yoktu (redis-py süresiz
+  beklerdi, exception atmazdı). Tetikleyici: `updater._loop()` içindeki
+  `_refresh_age_metric()` her turda çalışıyor ama `_run_cycle()`'ı koruyan
+  `asyncio.wait_for(UPDATER_CYCLE_TIMEOUT)` sarmalayıcısının **DIŞINDA** —
+  bu Redis çağrısı asılınca döngü sonsuza kadar takılıyor, piyasa açılsa
+  bile yeni tur başlamıyordu (devam 5'teki dedektör bunu 20 dk'da fark
+  ediyordu ama hiçbir şey otomatik toparlanmıyordu). Fix (4 katman):
+  1. `RedisStore.connect()` artık `socket_timeout` (`REDIS_SOCKET_TIMEOUT`,
+     vars. 10sn) geçirir — `pubsub.listen()` bundan ETKİLENMEZ (redis-py
+     blok=True'da bu ayarı bilerek geçersiz kılar, doğrulandı).
+  2. `_maybe_refresh_universe()` ve `_refresh_age_metric()` artık ayrı ayrı
+     `asyncio.wait_for(UPDATER_GUARD_TIMEOUT, vars. 20sn)` ile sarılı —
+     asımda log + o adım atlanır, döngü bir sonraki tura devam eder.
+  3. `/ready` de aynı zayıflığı taşıyordu (dedektörün kendisi wedge'e karşı
+     kör). Store-probe artık `READY_PROBE_TIMEOUT` (vars. 10sn) ile sarılı;
+     asımda store **çökmesiyle aynı** yapısal 503 döner.
+  4. **Savunma-katmanı:** bağımsız bir watchdog Task'i (`UPDATER_WATCHDOG_
+     TIMEOUT`, vars. 600sn) ana döngünün tur tamamlama sıklığını izler;
+     yukarıdaki guard'lara rağmen döngü asılırsa süreç `os._exit(1)` ile
+     sert sonlandırılır — updater HTTP servisi olmadığı için Docker
+     healthcheck'i yok, mevcut `restart: unless-stopped` politikası süreci
+     yeniden başlatır (compose değişikliği GEREKMEDİ).
+- **LOW (yan bulgu):** `updater._loop()`'ta `except Exception:` `CancelledError`'ı
+  zaten yakalamıyordu (BaseException alt sınıfı) ama dış iptalde (`stop()`
+  fallback yolu `_task.cancel()`) hata döngünün TAMAMINI kırıp `self.running
+  = False` satırına hiç uğramadan çıkıyordu — `running` bayrağı sürecin
+  sessizce öldüğünü gizleyerek sonsuza dek `True`'da takılı kalıyordu.
+  Tüm gövde `try/finally` ile sarıldı (+ açık `except asyncio.CancelledError:
+  raise`) — artık iptalde de `running` doğru şekilde `False`'a düşer.
+
+378 test yeşil (bir önceki turda 371 — 7 yeni test: guard-timeout kurtarma x2,
+running-flag/iptal, watchdog exit + healthy-noop, redis socket_timeout kwarg,
+/ready hang koruması), ruff + ruff format + mypy temiz.
+
 ## [0.1.0] - 2026-07-05
 
 ### Eklendi

@@ -350,6 +350,32 @@ class Settings:
     updater_cycle_timeout: float = field(
         default_factory=lambda: _get_float("UPDATER_CYCLE_TIMEOUT", 240.0)
     )
+    # Wedge fix (15-16 Tem nuksu): _maybe_refresh_universe()/_refresh_age_metric()
+    # updater_cycle_timeout'un DISINDA cagrilir (bkz. updater._loop) -- guard'siz
+    # bir Redis/HTTP cagrisi asilirsa TUM dongu suresiz kilitlenirdi, piyasa
+    # acik olsa bile yeni tur baslamazdi. Her iki cagri da bu butce ile
+    # ayri ayri sarilir; asimda log + o turun ilgili adimi atlanir.
+    updater_guard_timeout: float = field(
+        default_factory=lambda: _get_float("UPDATER_GUARD_TIMEOUT", 20.0)
+    )
+    # Savunma-katmani: ana dongu bu sureden uzun tur TAMAMLAMAZSA (yukaridaki
+    # guard'lara ragmen beklenmeyen bir asilma) surec SERT olarak sonlandirilir
+    # (bkz. updater.BackgroundUpdater._watchdog_loop) -- updater HTTP servisi
+    # olmadigi icin Docker healthcheck'i yok; compose'daki 'restart: unless-
+    # stopped' surecin kendisi olunce devreye girer. Tek bir turun en kotu
+    # olcekte alabilecegi sure (guard+guard+cycle) + update_interval'in cok
+    # uzerinde, comert bir tampon.
+    updater_watchdog_timeout: float = field(
+        default_factory=lambda: _get_float("UPDATER_WATCHDOG_TIMEOUT", 600.0)
+    )
+    updater_watchdog_check_interval: float = field(
+        default_factory=lambda: _get_float("UPDATER_WATCHDOG_CHECK_INTERVAL", 30.0)
+    )
+    # /ready DEDEKTORUN KENDISI store cagrisi asilirsa (wedge) suresiz beklemesin
+    # -- bu butce asilinca yapisal 503 doner (store cokmesiyle ayni davranis).
+    ready_probe_timeout: float = field(
+        default_factory=lambda: _get_float("READY_PROBE_TIMEOUT", 10.0)
+    )
 
     # Bulunamayan (kaynaklarda olmayan) semboller icin negatif onbellek TTL'i (sn).
     # Ayni gecersiz sembole tekrarli isteklerin upstream'i dovmesini onler.
@@ -371,6 +397,15 @@ class Settings:
     # insasinda kullanilir, baska hicbir yerde okunmaz/loglanmaz.
     redis_password: str = field(default_factory=lambda: _get_str("REDIS_PASSWORD", ""))
     redis_prefix: str = field(default_factory=lambda: _get_str("REDIS_PREFIX", "bist"))
+    # Wedge fix (kok neden): eskiden yalniz socket_connect_timeout (TCP el
+    # sikisma) vardi -- baglanti KURULDUKTAN SONRA bir komutun soket okumasi
+    # sessizce asilirsa hicbir sinir yoktu (redis-py suresiz beklerdi, exception
+    # atmazdi). pubsub.listen() bundan ETKILENMEZ (redis-py blok=True'da
+    # timeout=math.inf gonderip bu ayari BILEREK gecersiz kilar -- bos SSE
+    # kanallari yanlislikla kopmaz, dogrulandi).
+    redis_socket_timeout: float = field(
+        default_factory=lambda: _get_float("REDIS_SOCKET_TIMEOUT", 10.0)
+    )
 
     # --- Guvenlik / kimlik dogrulama ---
     api_key: str = field(default_factory=lambda: _get_str("API_KEY"))  # geriye uyum (tekil)
