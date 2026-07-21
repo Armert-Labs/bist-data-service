@@ -115,8 +115,17 @@ services:
       # percent-encode.
       - REDIS_URL=redis://redis:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD gerekli}
+    # M1 (infra-verify): 0.0.0.0 yerine host-bind adresi API_HOST env'inden
+    # okunur -- VM130'un ic arayuzune (10.10.10.130) baglanmasi icin canli
+    # .env'de API_HOST=10.10.10.130 TANIMLI OLMALI (VM120 tuketimi + VM140
+    # /metrics scrape bu adrese gider, updater/cadvisor'daki ayni desenin
+    # emsali). Tanimsizsa fail-safe varsayilan 127.0.0.1 -- 0.0.0.0'a asla
+    # dusmez (unutulmus env acik-yuzey degil erisilemezlik uretir), ayrica
+    # README'deki `docker compose up -d --build` + localhost:8000 hizli-
+    # baslangic akisini yerel gelistirmede bozmaz (colendi-gateway API_HOST
+    # emsali, bkz. services/colendi-gateway/docker-compose.yml).
     ports:
-      - "8000:8000"
+      - "${API_HOST:-127.0.0.1}:8000:8000"
     depends_on:
       redis:
         condition: service_healthy
@@ -187,9 +196,13 @@ services:
     # secilmisti, bkz. cadvisor notu). 80:80 kayip overlay'den geliyordu --
     # ikisi de VM130'da fiilen aktifti (compose liste-tipi alanlari birden
     # fazla -f arasinda BIRLESTIRIR, degistirmez); ikisi de korunuyor.
+    # M1 (infra-verify): api servisindeki ayni satirin ustundeki aciklama --
+    # 0.0.0.0 yerine PANEL_HOST env'i (VM130'da 10.10.10.130, cloudflared/
+    # VM110 tunnel'in bist-canli-veri.bisteyes.com'u bu adrese yonlendirmesi
+    # icin sart) kullanilir; tanimsizsa fail-safe 127.0.0.1.
     ports:
-      - "8080:80"
-      - "80:80"
+      - "${PANEL_HOST:-127.0.0.1}:8080:80"
+      - "${PANEL_HOST:-127.0.0.1}:80:80"
     depends_on:
       - api
     # nginx statik + reverse-proxy -- hafif, dar tavan.
